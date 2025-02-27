@@ -1,13 +1,15 @@
 import asyncio
 import os
+import threading
+import time
 from datetime import datetime
-from getStoryFromCoze import get_story
-from getCosyVoiceToken import get_token
-from cosyVoiceTTS import process_tts
+from cosyVoiceTTS import process_tts, get_token
 import sounddevice as sd
 import soundfile as sf
 import pygame
-import time
+import queue
+from getusercomment import start_comment_monitoring, stop_comment_monitoring
+from getResponseFromQianwen import process_live_comment
 
 # 配置参数
 USE_PYGAME = True  # 设置为 True 使用 pygame 播放，False 使用虚拟声卡
@@ -16,8 +18,18 @@ USE_PYGAME = True  # 设置为 True 使用 pygame 播放，False 使用虚拟声
 # 对于抖音直播伴侣：请在抖音直播伴侣中选择与此虚拟声卡相同的音频输入设备
 VIRTUAL_OUTPUT_DEVICE_ID = 17
 
+# 直播间URL，可以根据需要修改
+DOUYIN_LIVE_URL = "https://live.douyin.com/373297491977"
+
 # 初始化 pygame 混音器
 pygame.mixer.init()
+
+# 创建一个队列用于存储用户评论
+comment_queue = queue.Queue()
+
+# 创建一个事件用于控制故事播放和评论处理的协调
+story_paused = threading.Event()
+story_paused.clear()  # 初始状态为不暂停
 
 def list_devices():
     """
@@ -296,6 +308,162 @@ def find_virtual_audio_device():
     print("   - 如果您没有虚拟声卡，可以将USE_PYGAME设置为True，但这样抖音直播伴侣将无法捕获音频")
     print("="*80 + "\n")
 
+def comment_handler(username, comment_text, comment_type="评论"):
+    """
+    处理直播间评论的回调函数
+    
+    当收到直播间评论时，将评论放入队列并暂停故事播放
+    
+    Args:
+        username (str): 评论用户名
+        comment_text (str): 评论内容
+        comment_type (str): 评论类型，默认为"评论"
+    """
+    # 将评论信息放入队列
+    comment_queue.put((username, comment_text, comment_type))
+    
+    # 暂停故事播放，让AI回复评论
+    story_paused.set()
+
+async def process_comments():
+    """
+    异步处理评论队列中的评论
+    
+    从评论队列中获取评论，使用千问AI生成回复，并播放回复语音
+    """
+    print("开始评论处理线程")
+    
+    # 获取语音token
+    token = get_token()
+    if not token:
+        print("获取语音token失败，无法处理评论")
+        return
+    
+    while True:
+        try:
+            # 检查队列中是否有评论
+            if not comment_queue.empty():
+                # 获取评论信息
+                username, comment_text, comment_type = comment_queue.get()
+                
+                print(f"\n{'='*50}")
+                print(f"收到{comment_type}: {username}: {comment_text}")
+                
+                # 使用千问AI生成回复
+                system_prompt = "你是一个友好、幽默的直播助手，负责回答直播间观众的问题和评论。回复要简洁、有趣，不超过50个字。"
+                if comment_type == "礼物":
+                    system_prompt += "这是一个礼物，请表达感谢。"
+                
+                response = process_live_comment(f"{username}: {comment_text}", system_prompt)
+                
+                print(f"AI回复: {response}")
+                
+                # 生成回复语音
+                temp_output_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "story",
+                    f"response_{int(time.time())}.wav"
+                )
+                
+                # 使用TTS生成语音
+                process_tts(
+                    token,
+                    temp_output_path,
+                    [response],
+                    story_title=f"回复{username}",
+                    sentence_number=1,
+                    total_sentences=1
+                )
+                
+                # 播放完评论回复后，恢复故事播放
+                story_paused.clear()
+                
+                print(f"{'='*50}\n")
+            
+            # 短暂休眠，避免CPU占用过高
+            await asyncio.sleep(0.1)
+            
+        except Exception as e:
+            print(f"处理评论时出错: {str(e)}")
+            await asyncio.sleep(1)  # 出错时稍微长一点的休眠
+
+async def play_stories():
+    """
+    异步播放故事
+    
+    读取story文件夹中的故事文件，并使用TTS播放
+    在播放过程中会检查是否需要暂停以处理评论
+    """
+    try:
+        # 获取当前目录
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # 获取语音转换token
+        print("正在获取语音转换token...")
+        token = get_token()
+        if not token:
+            raise Exception("获取token失败")
+        print("成功获取语音token")
+        
+        # 使用story文件夹
+        story_folder = os.path.join(current_dir, "story")
+        if not os.path.exists(story_folder):
+            raise Exception("未找到story文件夹")
+        
+        # 读取故事文件
+        stories = load_story_files(story_folder)
+        if not stories:
+            raise Exception("未找到任何故事文件")
+        
+        # 处理每个故事
+        print("\n开始生成并播放语音...")
+        for story_file, story_content in stories:
+            # 使用文件名（不含扩展名）作为故事标识和标题
+            story_id = os.path.splitext(story_file)[0]
+            story_title = story_id  # 使用文件名作为故事标题显示
+            
+            print(f"\n{'='*50}")
+            print(f"开始播放故事: 【{story_title}】")
+            print(f"{'='*50}\n")
+            
+            # 将故事分割成句子
+            sentences = split_into_sentences(story_content)
+            print(f"故事共有 {len(sentences)} 个句子")
+            
+            # 为每个句子生成语音并实时播放
+            for i, sentence in enumerate(sentences, 1):
+                # 如果有评论需要处理，暂停故事播放
+                while story_paused.is_set():
+                    await asyncio.sleep(0.5)  # 等待评论处理完成
+                
+                # 构建一个临时路径
+                temp_output_path = os.path.join(
+                    story_folder, 
+                    f"voice_{story_id}_{i:03d}.wav"
+                )
+                
+                print(f"\n{'-'*40}")
+                print(f"播放进度: [{i}/{len(sentences)}]")
+                print(f"文本: {sentence}")
+                
+                # 使用直接播放模式，传递故事标题和句子信息
+                process_tts(
+                    token, 
+                    temp_output_path, 
+                    [sentence],
+                    story_title=story_title,
+                    sentence_number=i,
+                    total_sentences=len(sentences)
+                )
+                
+            # 故事播放完成后的分隔
+            print(f"\n{'*'*50}")
+            print(f"故事 【{story_title}】 播放完成!")
+            print(f"{'*'*50}\n")
+            
+    except Exception as e:
+        print(f"播放故事时出错：{str(e)}")
+
 async def main():
     """
     主函数，协调整个程序的执行流程。
@@ -304,10 +472,9 @@ async def main():
     1. 列出所有音频设备
     2. 清理story文件夹中的旧文件
     3. 清理旧版本的日期文件夹（兼容旧版本）
-    4. 获取语音合成token
-    5. 使用story文件夹
-    6. 读取故事文件
-    7. 为每个故事的每个句子生成语音并实时播放
+    4. 启动直播评论监控
+    5. 启动评论处理协程
+    6. 启动故事播放协程
     
     整个过程是异步的，使用asyncio协程实现。
     
@@ -334,70 +501,24 @@ async def main():
         delete_old_folders(current_dir)
         print("旧版本文件夹检查完成")
         
-        # 3. 获取语音转换token
-        print("正在获取语音转换token...")
-        token = get_token()
-        if not token:
-            raise Exception("获取token失败")
-        print("成功获取语音token")
+        # 3. 启动直播评论监控
+        print("\n启动直播评论监控...")
+        start_comment_monitoring(DOUYIN_LIVE_URL, comment_handler)
         
-        # 4. 使用story文件夹
-        story_folder = os.path.join(current_dir, "story")
-        if not os.path.exists(story_folder):
-            raise Exception("未找到story文件夹")
+        # 4. 创建并启动评论处理任务
+        comment_task = asyncio.create_task(process_comments())
         
-        # 5. 读取故事文件
-        stories = load_story_files(story_folder)
-        if not stories:
-            raise Exception("未找到任何故事文件")
+        # 5. 创建并启动故事播放任务
+        story_task = asyncio.create_task(play_stories())
         
-        # 6. 处理每个故事
-        print("\n开始生成并播放语音...")
-        for story_file, story_content in stories:
-            # 使用文件名（不含扩展名）作为故事标识和标题
-            story_id = os.path.splitext(story_file)[0]
-            story_title = story_id  # 使用文件名作为故事标题显示
-            
-            print(f"\n{'='*50}")
-            print(f"开始播放故事: 【{story_title}】")
-            print(f"{'='*50}\n")
-            
-            # 将故事分割成句子
-            sentences = split_into_sentences(story_content)
-            print(f"故事共有 {len(sentences)} 个句子")
-            
-            # 为每个句子生成语音并实时播放
-            for i, sentence in enumerate(sentences, 1):
-                # 构建一个临时路径（实际上不会用于保存文件）
-                temp_output_path = os.path.join(
-                    story_folder, 
-                    f"voice_{story_id}_{i:03d}.wav"
-                )
-                
-                print(f"\n{'-'*40}")
-                print(f"播放进度: [{i}/{len(sentences)}]")
-                print(f"文本: {sentence}")
-                
-                # 使用直接播放模式，传递故事标题和句子信息
-                # 语音合成SDK会通过回调通知播放完成，无需额外等待
-                process_tts(
-                    token, 
-                    temp_output_path, 
-                    [sentence],
-                    story_title=story_title,
-                    sentence_number=i,
-                    total_sentences=len(sentences)
-                )
-                
-                # 不再需要额外的等待时间，回调机制会确保播放完成后再继续
-                
-            # 故事播放完成后的分隔
-            print(f"\n{'*'*50}")
-            print(f"故事 【{story_title}】 播放完成!")
-            print(f"{'*'*50}\n")
+        # 等待所有任务完成
+        await asyncio.gather(comment_task, story_task)
             
     except Exception as e:
         print(f"运行出错：{str(e)}")
+    finally:
+        # 确保停止评论监控
+        stop_comment_monitoring()
 
 if __name__ == "__main__":
     # 运行主函数
