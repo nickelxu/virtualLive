@@ -12,6 +12,8 @@ import time
 # 配置参数
 USE_PYGAME = True  # 设置为 True 使用 pygame 播放，False 使用虚拟声卡
 # 虚拟声卡输出设备ID， 如需更改请修改此值
+# 注意：请使用 list_devices() 函数查看您系统中的设备列表，找到虚拟声卡的ID
+# 对于抖音直播伴侣：请在抖音直播伴侣中选择与此虚拟声卡相同的音频输入设备
 VIRTUAL_OUTPUT_DEVICE_ID = 17
 
 # 初始化 pygame 混音器
@@ -262,6 +264,38 @@ def delete_old_folders(current_dir, keep_days=7):
     except Exception as e:
         print(f"清理旧文件夹时出错: {str(e)}")
 
+def find_virtual_audio_device():
+    """
+    帮助用户找到虚拟声卡设备。
+    
+    此函数列出所有音频设备，并提供指导帮助用户找到合适的虚拟声卡设备ID。
+    对于抖音直播伴侣，用户需要选择同一个虚拟声卡作为音频输入。
+    
+    Returns:
+        None: 直接打印设备信息和指导到控制台
+    """
+    print("\n" + "="*80)
+    print("虚拟声卡设置指南")
+    print("="*80)
+    print("1. 以下是您系统中的所有音频设备:")
+    devices = sd.query_devices()
+    for i, device in enumerate(devices):
+        print(f"   设备 {i}: {device['name']} ({'输入' if device['max_input_channels'] > 0 else ''}{'输出' if device['max_output_channels'] > 0 else ''})")
+    
+    print("\n2. 如何选择正确的虚拟声卡:")
+    print("   - 寻找带有 'Virtual', 'VB-Audio', 'Soundflower' 等关键词的设备")
+    print("   - 确保选择的是输出设备（有'输出'标记）")
+    print(f"   - 当前配置的虚拟声卡设备ID是: {VIRTUAL_OUTPUT_DEVICE_ID}")
+    
+    print("\n3. 如何配置抖音直播伴侣:")
+    print("   - 在抖音直播伴侣中，选择与上面相同的虚拟声卡作为音频输入")
+    print("   - 这样，本程序输出的音频就会被抖音直播伴侣捕获并播放")
+    
+    print("\n4. 如何修改设置:")
+    print("   - 如需更改虚拟声卡设备ID，请修改main.py中的VIRTUAL_OUTPUT_DEVICE_ID值")
+    print("   - 如果您没有虚拟声卡，可以将USE_PYGAME设置为True，但这样抖音直播伴侣将无法捕获音频")
+    print("="*80 + "\n")
+
 async def main():
     """
     主函数，协调整个程序的执行流程。
@@ -270,11 +304,10 @@ async def main():
     1. 列出所有音频设备
     2. 清理story文件夹中的旧文件
     3. 清理旧版本的日期文件夹（兼容旧版本）
-    4. 从Coze平台生成并保存一个新故事
-    5. 获取语音合成token
-    6. 使用story文件夹
-    7. 读取故事文件
-    8. 为每个故事的每个句子生成语音并实时播放
+    4. 获取语音合成token
+    5. 使用story文件夹
+    6. 读取故事文件
+    7. 为每个故事的每个句子生成语音并实时播放
     
     整个过程是异步的，使用asyncio协程实现。
     
@@ -284,6 +317,10 @@ async def main():
     try:
         print("列出所有音频设备，确保虚拟声卡设置正确：")
         list_devices()
+        
+        # 显示虚拟声卡设置指南
+        find_virtual_audio_device()
+        
         # 获取当前目录
         current_dir = os.path.dirname(os.path.abspath(__file__))
         
@@ -297,29 +334,24 @@ async def main():
         delete_old_folders(current_dir)
         print("旧版本文件夹检查完成")
         
-        # 3. 生成故事
-        print("\n开始生成故事...")
-        get_story()  # 从Coze平台获取并保存一个新故事
-        print("故事生成完成")
-        
-        # 4. 获取语音转换token
+        # 3. 获取语音转换token
         print("正在获取语音转换token...")
         token = get_token()
         if not token:
             raise Exception("获取token失败")
         print("成功获取语音token")
         
-        # 5. 使用story文件夹
+        # 4. 使用story文件夹
         story_folder = os.path.join(current_dir, "story")
         if not os.path.exists(story_folder):
             raise Exception("未找到story文件夹")
         
-        # 6. 读取故事文件
+        # 5. 读取故事文件
         stories = load_story_files(story_folder)
         if not stories:
             raise Exception("未找到任何故事文件")
         
-        # 7. 处理每个故事
+        # 6. 处理每个故事
         print("\n开始生成并播放语音...")
         for story_file, story_content in stories:
             # 使用文件名（不含扩展名）作为故事标识和标题
