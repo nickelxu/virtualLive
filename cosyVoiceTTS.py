@@ -215,9 +215,9 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
                 frames_per_buffer=1024
             )
 
-        # 在控制台显示播放信息
+        # 在控制台显示播放信息 - 简化输出
         if story_title and sentence_number and total_sentences:
-            print(f"\n===== 正在播放: 【{story_title}】 第 {sentence_number}/{total_sentences} 句 =====")
+            print(f"播放: 【{story_title}】 {sentence_number}/{total_sentences}: {test_text[0]}")
 
         def test_on_data(data, *args):
             """
@@ -258,10 +258,7 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
             """
             nonlocal completed
             completed = True
-            if story_title and sentence_number:
-                print(f"✓ 完成播放: 【{story_title}】 第 {sentence_number}/{total_sentences} 句")
-            else:
-                print("on_close: args=>{}".format(args))
+            # 移除完成播放的输出信息
 
         def test_on_error(message, *args):
             """
@@ -308,11 +305,7 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
             while not completed and time.time() - wait_start < max_wait:
                 time.sleep(0.01)  # 短暂睡眠，避免CPU使用率过高
             
-            end_time = time.time()
-            actual_time = end_time - start_time
-            # 输出实际花费的时间
-            if story_title and sentence_number:
-                print(f"句子实际用时: {actual_time:.2f}秒")
+            # 移除句子实际用时的输出
 
         # 关闭SDK连接
         sdk.shutdown()

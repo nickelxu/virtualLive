@@ -13,24 +13,12 @@ import importlib
 from getusercomment import start_comment_monitoring, stop_comment_monitoring
 from getResponseFromQianwen import process_live_comment
 
-# 导入代码热重载模块
-try:
-    from code_reloader import start_monitoring, stop_monitoring
-    HAS_CODE_RELOADER = True
-except ImportError:
-    print("提示: 没有找到code_reloader模块，代码热重载功能将被禁用")
-    print("如需启用代码热重载，请先安装watchdog库: pip install watchdog")
-    HAS_CODE_RELOADER = False
-
 # 配置参数
 USE_PYGAME = False  # 设置为 False 使用虚拟声卡播放，让直播伴侣可以捕获音频
 # 虚拟声卡输出设备ID， 如需更改请修改此值
 # 注意：请使用 list_devices() 函数查看您系统中的设备列表，找到虚拟声卡的ID
 # 对于抖音直播伴侣：请在抖音直播伴侣中选择与此虚拟声卡相同的音频输入设备
 VIRTUAL_OUTPUT_DEVICE_ID = 17  # CABLE Input (VB-Audio Virtual Cable), Windows DirectSound
-
-# 是否启用代码热重载功能 (允许直播过程中更新代码)
-ENABLE_HOT_RELOAD = True
 
 # 直播间URL需要通过命令行参数提供，不再硬编码
 
@@ -41,25 +29,12 @@ pygame.mixer.init()
 story_paused = threading.Event()
 story_paused.clear()  # 初始状态为不暂停
 
-# 全局变量，用于热重载后恢复状态
+# 全局变量，用于存储语音token
 global_token = None
 # 互动处理锁，防止多个互动同时处理导致冲突
 interaction_lock = threading.Lock()
 # 当前是否正在处理互动
 is_processing_interaction = False
-
-def list_devices():
-    """
-    列出系统中所有可用的音频设备。
-    
-    这个函数使用 sounddevice 库查询并打印所有可用的音频输入和输出设备，
-    包括它们的ID、名称和通道数等信息。在配置虚拟声卡时非常有用。
-    
-    Returns:
-        None: 直接打印设备信息到控制台
-    """
-    print("音频设备列表：")
-    print(sd.query_devices())
 
 def play_wav_file_virtual(file_path, device):
     """
@@ -193,106 +168,6 @@ def split_into_sentences(text):
             sentences.append(sentence)
     return sentences
 
-def delete_old_files(current_dir, keep_files=10):
-    """
-    清理story文件夹中的旧文件
-    
-    保留story文件夹中最新的几个故事文件和相关的语音文件，删除较旧的文件。
-    
-    Args:
-        current_dir (str): 当前工作目录
-        keep_files (int, optional): 要保留的故事文件数量。默认为10个。
-        
-    Returns:
-        None
-    """
-    try:
-        # 获取story文件夹路径
-        story_folder = os.path.join(current_dir, "story")
-        if not os.path.exists(story_folder):
-            print("未找到story文件夹，跳过清理")
-            return
-        
-        # 获取所有txt文件（故事文件）
-        story_files = [f for f in os.listdir(story_folder) if f.endswith('.txt')]
-        if not story_files:
-            print("未找到任何故事文件，跳过清理")
-            return
-        
-        # 按文件创建时间排序（最新的在前面）
-        story_files.sort(key=lambda x: os.path.getctime(os.path.join(story_folder, x)), reverse=True)
-        
-        # 保留最新的几个文件，删除其余的
-        files_to_delete = story_files[keep_files:]
-        if not files_to_delete:
-            print("没有需要删除的旧文件")
-            return
-        
-        print(f"将删除 {len(files_to_delete)} 个旧故事文件及相关语音文件")
-        for file in files_to_delete:
-            # 删除故事文件
-            file_path = os.path.join(story_folder, file)
-            try:
-                os.remove(file_path)
-                print(f"已删除故事文件: {file}")
-                
-                # 删除与此故事相关的语音文件
-                file_base = os.path.splitext(file)[0]  # 获取不带扩展名的文件名
-                voice_pattern = f"voice_{file_base}_*.wav"
-                for voice_file in os.listdir(story_folder):
-                    if voice_file.startswith(f"voice_{file_base}_") and voice_file.endswith(".wav"):
-                        voice_path = os.path.join(story_folder, voice_file)
-                        os.remove(voice_path)
-                        print(f"已删除语音文件: {voice_file}")
-            except Exception as e:
-                print(f"删除文件 {file} 时出错: {str(e)}")
-                
-    except Exception as e:
-        print(f"清理旧文件时出错: {str(e)}")
-
-# 清理旧的日期文件夹（兼容旧版本）
-def delete_old_folders(current_dir, keep_days=7):
-    """
-    清理旧的日期文件夹 (仅用于兼容旧版本)
-    
-    检查并删除超过指定保留天数的日期文件夹，仅保留最近的几个文件夹。
-    本函数仅用于兼容旧版本，新版本将所有故事保存在story文件夹中。
-    
-    Args:
-        current_dir (str): 当前工作目录
-        keep_days (int, optional): 保留的文件夹数量。默认为7天。
-        
-    Returns:
-        None
-    """
-    try:
-        # 获取所有日期命名的文件夹（8位数字作为文件夹名）
-        date_folders = [f for f in os.listdir(current_dir) if len(f) == 8 and f.isdigit()]
-        if not date_folders:
-            return  # 没有日期文件夹，直接返回
-        
-        # 按日期排序
-        date_folders.sort(reverse=True)
-        
-        # 保留最近的文件夹，删除其余的
-        folders_to_delete = date_folders[keep_days:]
-        for folder in folders_to_delete:
-            folder_path = os.path.join(current_dir, folder)
-            try:
-                print(f"删除旧文件夹: {folder}")
-                # 删除文件夹及其所有内容
-                for root, dirs, files in os.walk(folder_path, topdown=False):
-                    for name in files:
-                        os.remove(os.path.join(root, name))
-                    for name in dirs:
-                        os.rmdir(os.path.join(root, name))
-                os.rmdir(folder_path)
-            except Exception as e:
-                print(f"删除文件夹 {folder} 时出错: {str(e)}")
-                
-    except Exception as e:
-        print(f"清理旧文件夹时出错: {str(e)}")
-
 def find_virtual_audio_device():
     """
     帮助用户找到虚拟声卡设备。
@@ -347,8 +222,7 @@ async def process_interaction(username, comment_text, comment_type="评论"):
             # 暂停故事播放，让AI回复评论
             story_paused.set()
             
-            print(f"\n{'='*50}")
-            print(f"处理{comment_type}: {username}: {comment_text}")
+            print(f"\n处理{comment_type}: {username}: {comment_text}")
             
             # 使用千问AI生成回复
             system_prompt = "你是一个友好、幽默的直播助手，负责回答直播间观众的问题和评论。回复要简洁、有趣，不超过50个字。"
@@ -397,7 +271,6 @@ async def process_interaction(username, comment_text, comment_type="评论"):
             else:
                 print(f"警告: 语音文件未生成: {temp_output_path}")
             
-            print(f"{'='*50}\n")
         except Exception as e:
             print(f"处理互动时出错: {str(e)}")
         finally:
@@ -429,27 +302,6 @@ def comment_handler(username, comment_text, comment_type="评论"):
         daemon=True
     ).start()
 
-# 当模块重新加载时的回调函数
-def on_module_reloaded(module_name):
-    """
-    当模块被重新加载时，这个函数会被调用。
-    可以在这里执行一些状态恢复或特殊处理。
-    
-    Args:
-        module_name (str): 被重新加载的模块名
-    """
-    print(f"\n{'='*50}")
-    print(f"模块 {module_name} 已成功热重载!")
-    print(f"{'='*50}\n")
-    
-    # 这里可以添加针对特定模块的处理逻辑
-    if module_name == "cosyVoiceTTS":
-        print("语音合成模块已更新，将在下一次合成时使用新版本")
-    elif module_name == "getResponseFromQianwen":
-        print("AI响应模块已更新，将在下一次生成回复时使用新版本")
-    elif module_name == "getusercomment":
-        print("评论获取模块已更新，请考虑重启程序以完全应用更改")
-
 async def play_stories():
     """
     异步播放故事
@@ -477,15 +329,13 @@ async def play_stories():
             raise Exception("未找到任何故事文件")
         
         # 处理每个故事
-        print("\n开始生成并播放语音...")
+        print("\n开始播放故事...")
         for story_file, story_content in stories:
             # 使用文件名（不含扩展名）作为故事标识和标题
             story_id = os.path.splitext(story_file)[0]
             story_title = story_id  # 使用文件名作为故事标题显示
             
-            print(f"\n{'='*50}")
-            print(f"开始播放故事: 【{story_title}】")
-            print(f"{'='*50}\n")
+            print(f"\n开始播放故事: 【{story_title}】")
             
             # 将故事分割成句子
             sentences = split_into_sentences(story_content)
@@ -503,10 +353,7 @@ async def play_stories():
                     f"voice_{story_id}_{i:03d}.wav"
                 )
                 
-                print(f"\n{'-'*40}")
-                print(f"播放进度: [{i}/{len(sentences)}]")
-                print(f"文本: {sentence}")
-                
+                # 简化输出，不再打印分隔线和进度信息
                 # 使用直接播放模式，传递故事标题和句子信息
                 process_tts(
                     token, 
@@ -518,9 +365,7 @@ async def play_stories():
                 )
                 
             # 故事播放完成后的分隔
-            print(f"\n{'*'*50}")
             print(f"故事 【{story_title}】 播放完成!")
-            print(f"{'*'*50}\n")
             
     except Exception as e:
         print(f"播放故事时出错：{str(e)}")
@@ -530,11 +375,8 @@ async def main():
     主函数，协调整个程序的执行流程。
     
     执行以下步骤：
-    1. 列出所有音频设备
-    2. 清理story文件夹中的旧文件
-    3. 清理旧版本的日期文件夹（兼容旧版本）
-    4. 启动直播评论监控
-    5. 启动故事播放协程
+    1. 启动直播评论监控
+    2. 启动故事播放协程
     
     整个过程是异步的，使用asyncio协程实现。
     
@@ -554,52 +396,16 @@ async def main():
         douyin_live_url = sys.argv[1]
         print(f"使用直播间URL: {douyin_live_url}")
         
-        print("列出所有音频设备，确保虚拟声卡设置正确：")
-        list_devices()
-        
-        # 显示虚拟声卡设置指南
-        find_virtual_audio_device()
-        
-        # 获取当前目录
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # 1. 清理story文件夹中的旧文件
-        print("\n开始清理story文件夹中的旧文件...")
-        delete_old_files(current_dir)
-        print("story文件夹清理完成")
-        
-        # 2. 清理旧版本的日期文件夹（兼容旧版本）
-        print("\n开始检查旧版本的日期文件夹...")
-        delete_old_folders(current_dir)
-        print("旧版本文件夹检查完成")
-        
-        # 启用代码热重载功能 (允许直播过程中更新代码)
-        if ENABLE_HOT_RELOAD and HAS_CODE_RELOADER:
-            print("\n正在启动代码热重载监控...")
-            # 指定需要监控的模块
-            modules_to_watch = [
-                "cosyVoiceTTS",
-                "getResponseFromQianwen", 
-                "getusercomment"
-            ]
-            # 启动代码重载监控
-            start_monitoring(modules_to_watch, on_module_reloaded)
-            print("代码热重载监控已启动，您可以在直播过程中修改代码")
-            print("支持热重载的模块: " + ", ".join(modules_to_watch))
-            print("注意: 某些更改可能需要重启程序才能完全生效")
-        
-        # 获取语音转换token并保存到全局变量，方便热重载后使用
-        print("正在获取语音转换token...")
+        # 获取语音转换token并保存到全局变量
         global_token = get_token()
         if not global_token:
             raise Exception("获取token失败")
-        print("成功获取语音token")
         
-        # 3. 启动直播评论监控
+        # 启动直播评论监控
         print("\n启动直播评论监控...")
         start_comment_monitoring(douyin_live_url, comment_handler)
         
-        # 4. 创建并启动故事播放任务
+        # 创建并启动故事播放任务
         story_task = asyncio.create_task(play_stories())
         
         # 等待故事播放任务完成
@@ -608,10 +414,8 @@ async def main():
     except Exception as e:
         print(f"运行出错：{str(e)}")
     finally:
-        # 确保停止评论监控和代码监控
+        # 确保停止评论监控
         stop_comment_monitoring()
-        if ENABLE_HOT_RELOAD and HAS_CODE_RELOADER:
-            stop_monitoring()
 
 if __name__ == "__main__":
     # 运行主函数
