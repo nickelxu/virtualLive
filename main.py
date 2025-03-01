@@ -200,6 +200,29 @@ def find_virtual_audio_device():
     print("   - 如果您没有虚拟声卡，可以将USE_PYGAME设置为True，但这样抖音直播伴侣将无法捕获音频")
     print("="*80 + "\n")
 
+def comment_handler(username, comment_text, comment_type="评论"):
+    """
+    处理直播间评论的回调函数
+    
+    当收到直播间评论时，直接处理评论而不是放入队列
+    
+    Args:
+        username (str): 评论用户名
+        comment_text (str): 评论内容
+        comment_type (str): 评论类型，默认为"评论"
+    """
+    # 如果已经在处理互动，则跳过
+    if is_processing_interaction:
+        print(f"跳过: {username} - {comment_text}")
+        return
+    
+    # 使用线程来处理互动，而不是尝试创建异步任务
+    # 这是因为comment_handler是在非异步环境中被调用的
+    threading.Thread(
+        target=lambda: asyncio.run(process_interaction(username, comment_text, comment_type)),
+        daemon=True
+    ).start()
+
 async def process_interaction(username, comment_text, comment_type="评论"):
     """
     处理用户互动
@@ -278,29 +301,6 @@ async def process_interaction(username, comment_text, comment_type="评论"):
             story_paused.clear()
             # 重置处理标志
             is_processing_interaction = False
-
-def comment_handler(username, comment_text, comment_type="评论"):
-    """
-    处理直播间评论的回调函数
-    
-    当收到直播间评论时，直接处理评论而不是放入队列
-    
-    Args:
-        username (str): 评论用户名
-        comment_text (str): 评论内容
-        comment_type (str): 评论类型，默认为"评论"
-    """
-    # 如果已经在处理互动，则跳过
-    if is_processing_interaction:
-        print(f"正在处理其他互动，跳过: {username}: {comment_text}")
-        return
-    
-    # 使用线程来处理互动，而不是尝试创建异步任务
-    # 这是因为comment_handler是在非异步环境中被调用的
-    threading.Thread(
-        target=lambda: asyncio.run(process_interaction(username, comment_text, comment_type)),
-        daemon=True
-    ).start()
 
 async def play_stories():
     """

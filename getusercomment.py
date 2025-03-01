@@ -236,33 +236,6 @@ def _monitor_comments(live_url, callback_function):
         print(f"正在访问直播间: {live_url}")
         _driver.get(live_url)
         
-        # 执行JavaScript来绕过反爬虫检测
-        print("执行JavaScript绕过反爬虫检测...")
-        _driver.execute_script("""
-        // 覆盖WebDriver属性
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => false,
-        });
-        
-        // 覆盖navigator属性
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-                Promise.resolve({ state: Notification.permission }) :
-                originalQuery(parameters)
-        );
-        
-        // 添加假的插件
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
-        });
-        
-        // 添加假的语言
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['zh-CN', 'zh', 'en'],
-        });
-        """)
-        
         try:
             # 等待页面加载完成
             print("等待页面加载完成...")
@@ -345,13 +318,13 @@ def _monitor_comments(live_url, callback_function):
                                 # 尝试添加到互动记录中，如果成功（不是重复的）则处理
                                 # 直接将回调函数传递给add_interaction，实现实时响应
                                 if add_interaction(interaction_type, username, content, callback_function=callback_function):
-                                    # 格式化输出解析结果
+                                    # 简化输出格式，每条评论只打印一行
                                     if interaction_type == "评论":
                                         print(f"[评论] {username}: {content}")
                                     else:
                                         print(f"[礼物] {username} {content}")
                 except Exception as e:
-                    print(f"获取评论时出错，跳过本次循环: {e}")
+                    print(f"获取评论时出错: {e}")
                 
                 # 随机延迟，避免请求过于频繁
                 time.sleep(random.uniform(0.5, 1.5))
