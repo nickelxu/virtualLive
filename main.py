@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import sys
+import io
 from datetime import datetime
 from cosyVoiceTTS import process_tts, get_token
 import sounddevice as sd
@@ -10,6 +11,7 @@ import soundfile as sf
 import pygame
 import queue
 import importlib
+import numpy as np
 from getusercomment import start_comment_monitoring, stop_comment_monitoring
 from getResponseFromQianwen import process_live_comment
 
@@ -33,70 +35,79 @@ interaction_lock = threading.Lock()
 # 当前是否正在处理互动
 is_processing_interaction = False
 
-def play_wav_file_virtual(file_path, device):
+# 新增：评论缓存队列
+comment_cache = []
+# 新增：评论缓存锁，防止多线程访问冲突
+comment_cache_lock = threading.Lock()
+# 新增：句子播放完成事件
+sentence_completed = threading.Event()
+sentence_completed.set()  # 初始状态为已完成
+
+def play_audio_data_virtual(audio_data, device):
     """
-    通过虚拟声卡播放WAV音频文件。
+    通过虚拟声卡播放音频数据。
     
-    使用 sounddevice 和 soundfile 库通过指定的虚拟声卡设备播放WAV文件。
-    播放完成后会自动删除音频文件以节省磁盘空间。
+    使用 sounddevice 和 soundfile 库通过指定的虚拟声卡设备播放内存中的音频数据。
     
     Args:
-        file_path (str): WAV文件的路径
+        audio_data (bytes): WAV格式的音频数据
         device (int): 虚拟声卡设备的ID
-        
-    Raises:
-        FileNotFoundError: 如果指定的音频文件不存在
     """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"音频文件不存在: {file_path}")
     try:
-        data, samplerate = sf.read(file_path)
-        sd.play(data, samplerate=samplerate, device=device)
-        sd.wait()
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        # 从内存缓冲区读取音频数据
+        with io.BytesIO(audio_data) as audio_buffer:
+            data, samplerate = sf.read(audio_buffer)
+            sd.play(data, samplerate=samplerate, device=device)
+            sd.wait()
+    except Exception as e:
+        print(f"播放音频数据时出错: {str(e)}")
 
-def play_wav_file_pygame(file_path):
+def play_audio_data_pygame(audio_data):
     """
-    使用pygame播放WAV音频文件。
+    使用pygame播放内存中的音频数据。
     
-    通过pygame库播放WAV文件，播放完成后会自动删除音频文件以节省磁盘空间。
-    相比虚拟声卡方式，pygame方式兼容性更好，适用于没有配置虚拟声卡的环境。
+    通过pygame库播放内存中的WAV音频数据。
     
     Args:
-        file_path (str): WAV文件的路径
-        
-    Raises:
-        FileNotFoundError: 如果指定的音频文件不存在
+        audio_data (bytes): WAV格式的音频数据
     """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"音频文件不存在: {file_path}")
     try:
-        sound = pygame.mixer.Sound(file_path)
-        sound.play()
-        pygame.time.wait(int(sound.get_length() * 1000))  # 等待音频播放完成
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        # 创建临时文件对象
+        with io.BytesIO(audio_data) as audio_buffer:
+            sound = pygame.mixer.Sound(audio_buffer)
+            sound.play()
+            pygame.time.wait(int(sound.get_length() * 1000))  # 等待音频播放完成
+    except Exception as e:
+        print(f"播放音频数据时出错: {str(e)}")
 
-async def play_audio(audio_file_path):
+async def play_audio(audio_data):
     """
-    异步播放音频文件。
+    异步播放音频数据。
     
-    根据配置选择使用pygame或虚拟声卡方式播放音频文件。
+    根据配置选择使用pygame或虚拟声卡方式播放内存中的音频数据。
     这个函数是异步的，可以在异步环境中调用而不会阻塞主线程。
     
     Args:
-        audio_file_path (str): 音频文件的路径
+        audio_data (bytes): WAV格式的音频数据
         
     Returns:
         None
     """
+    # 标记句子开始播放
+    sentence_completed.clear()
+    
     if USE_PYGAME:
-        await asyncio.to_thread(play_wav_file_pygame, audio_file_path)
+        await asyncio.to_thread(play_audio_data_pygame, audio_data)
     else:
-        await asyncio.to_thread(play_wav_file_virtual, audio_file_path, VIRTUAL_OUTPUT_DEVICE_ID)
+        await asyncio.to_thread(play_audio_data_virtual, audio_data, VIRTUAL_OUTPUT_DEVICE_ID)
+    
+    # 标记句子播放完成
+    sentence_completed.set()
+    
+    # 如果有评论需要处理，设置暂停事件
+    with comment_cache_lock:
+        if comment_cache and not is_processing_interaction:
+            story_paused.set()
 
 def load_story_files(folder_path):
     """
@@ -151,24 +162,22 @@ def comment_handler(username, comment_text, comment_type="评论"):
     """
     处理直播间评论的回调函数
     
-    当收到直播间评论时，直接处理评论而不是放入队列
+    当收到直播间评论时，将评论放入缓存队列
     
     Args:
         username (str): 评论用户名
         comment_text (str): 评论内容
         comment_type (str): 评论类型，默认为"评论"
     """
-    # 如果已经在处理互动，则跳过
-    if is_processing_interaction:
-        print(f"跳过: {username} - {comment_text}")
-        return
-    
-    # 使用线程来处理互动，而不是尝试创建异步任务
-    # 这是因为comment_handler是在非异步环境中被调用的
-    threading.Thread(
-        target=lambda: asyncio.run(process_interaction(username, comment_text, comment_type)),
-        daemon=True
-    ).start()
+    # 将评论添加到缓存队列
+    with comment_cache_lock:
+        comment_cache.append((username, comment_text, comment_type))
+        # 只打印一次缓存评论信息
+        print(f"缓存评论: {username}: {comment_text}")
+        
+        # 如果当前句子已播放完成且没有正在处理的互动，设置暂停事件
+        if sentence_completed.is_set() and not is_processing_interaction:
+            story_paused.set()
 
 async def process_interaction(username, comment_text, comment_type="评论"):
     """
@@ -189,11 +198,6 @@ async def process_interaction(username, comment_text, comment_type="评论"):
         is_processing_interaction = True
         
         try:
-            # 暂停故事播放，让AI回复评论
-            story_paused.set()
-            
-            print(f"\n处理{comment_type}: {username}: {comment_text}")
-            
             # 使用千问AI生成回复
             system_prompt = "你是一个友好、幽默的直播助手，负责回答直播间观众的问题和评论。回复要简洁、有趣，不超过50个字。"
             if comment_type == "礼物":
@@ -201,14 +205,8 @@ async def process_interaction(username, comment_text, comment_type="评论"):
             
             response = process_live_comment(f"{username}: {comment_text}", system_prompt)
             
-            print(f"AI回复: {response}")
-            
-            # 生成回复语音
-            temp_output_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "story",
-                f"response_{int(time.time())}.wav"
-            )
+            # 只打印评论原文和回复信息
+            print(f"回复评论 - {username}: {comment_text} -> {response}")
             
             # 获取token，如果全局token不可用则重新获取
             token = global_token
@@ -222,10 +220,9 @@ async def process_interaction(username, comment_text, comment_type="评论"):
                 print("无法获取语音token，跳过语音生成")
                 return
             
-            # 使用TTS生成语音
-            process_tts(
+            # 使用TTS生成语音数据
+            audio_data = process_tts(
                 token,
-                temp_output_path,
                 [response],
                 story_title=f"回复{username}",
                 sentence_number=1,
@@ -233,21 +230,46 @@ async def process_interaction(username, comment_text, comment_type="评论"):
             )
             
             # 播放语音回复
-            if os.path.exists(temp_output_path):
-                if USE_PYGAME:
-                    play_wav_file_pygame(temp_output_path)
-                else:
-                    play_wav_file_virtual(temp_output_path, VIRTUAL_OUTPUT_DEVICE_ID)
+            if audio_data:
+                await play_audio(audio_data)
             else:
-                print(f"警告: 语音文件未生成: {temp_output_path}")
+                print(f"警告: 语音数据生成失败")
             
         except Exception as e:
             print(f"处理互动时出错: {str(e)}")
         finally:
-            # 处理完成后，恢复故事播放
-            story_paused.clear()
+            # 处理完成后，清空评论缓存
+            with comment_cache_lock:
+                comment_cache.clear()
+                # 移除清空缓存的打印信息
+            
             # 重置处理标志
             is_processing_interaction = False
+            # 恢复故事播放
+            story_paused.clear()
+
+# 处理评论缓存的函数
+async def process_comment_cache():
+    """处理评论缓存中的最新评论"""
+    global is_processing_interaction
+    
+    # 如果已经在处理互动，直接返回
+    if is_processing_interaction:
+        return
+    
+    # 从缓存中获取最新的评论
+    with comment_cache_lock:
+        if not comment_cache:
+            # 如果缓存为空，清除暂停事件
+            story_paused.clear()
+            return
+        
+        # 获取最新的评论（列表中的最后一项）
+        latest_comment = comment_cache[-1]
+        username, comment_text, comment_type = latest_comment
+    
+    # 处理最新的评论
+    await process_interaction(username, comment_text, comment_type)
 
 async def play_stories():
     """
@@ -268,7 +290,8 @@ async def play_stories():
         # 使用story文件夹
         story_folder = os.path.join(current_dir, "story")
         if not os.path.exists(story_folder):
-            raise Exception("未找到story文件夹")
+            os.makedirs(story_folder)
+            print(f"创建story文件夹: {story_folder}")
         
         # 读取故事文件
         stories = load_story_files(story_folder)
@@ -276,7 +299,6 @@ async def play_stories():
             raise Exception("未找到任何故事文件")
         
         # 处理每个故事
-        print("\n开始播放故事...")
         for story_file, story_content in stories:
             # 使用文件名（不含扩展名）作为故事标识和标题
             story_id = os.path.splitext(story_file)[0]
@@ -286,29 +308,34 @@ async def play_stories():
             
             # 将故事分割成句子
             sentences = split_into_sentences(story_content)
-            print(f"故事共有 {len(sentences)} 个句子")
             
             # 为每个句子生成语音并实时播放
             for i, sentence in enumerate(sentences, 1):
-                # 如果有评论需要处理，暂停故事播放
-                while story_paused.is_set():
-                    await asyncio.sleep(0.5)  # 等待评论处理完成
+                # 如果有评论需要处理，先处理评论
+                if story_paused.is_set():
+                    await process_comment_cache()
                 
-                # 构建一个临时路径
-                temp_output_path = os.path.join(
-                    story_folder, 
-                    f"voice_{story_id}_{i:03d}.wav"
-                )
+                print(f"生成第 {i}/{len(sentences)} 句语音: {sentence[:30]}...")
                 
-                # 使用直接播放模式，传递故事标题和句子信息
-                process_tts(
+                # 使用TTS生成语音数据
+                audio_data = process_tts(
                     token, 
-                    temp_output_path, 
                     [sentence],
                     story_title=story_title,
                     sentence_number=i,
                     total_sentences=len(sentences)
                 )
+                
+                # 播放生成的语音
+                if audio_data:
+                    await play_audio(audio_data)
+                else:
+                    print(f"警告: 第 {i} 句语音数据生成失败，跳过")
+                    continue
+                
+                # 每句话播放完成后，检查是否有评论需要处理
+                if story_paused.is_set():
+                    await process_comment_cache()
                 
             # 故事播放完成后的分隔
             print(f"故事 【{story_title}】 播放完成!")
@@ -348,7 +375,6 @@ async def main():
             raise Exception("获取token失败")
         
         # 启动直播评论监控
-        print("\n启动直播评论监控...")
         start_comment_monitoring(douyin_live_url, comment_handler)
         
         # 创建并启动故事播放任务

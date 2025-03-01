@@ -35,9 +35,9 @@ nls.enableTrace(False)
 
 # 配置选项
 # 将音频保存进文件
-SAVE_TO_FILE = False
+SAVE_TO_FILE = True
 # 将音频通过播放器实时播放，需要具有声卡。在服务器上运行请将此开关关闭
-PLAY_REALTIME_RESULT = True
+PLAY_REALTIME_RESULT = False
 if PLAY_REALTIME_RESULT:
     import pyaudio
 
@@ -121,8 +121,6 @@ def load_text_from_story_folder():
         except Exception as e:
             print(f"读取文件 {latest_file} 时出错: {str(e)}")
     
-    print(f"从story文件夹中加载了 {files_processed} 个文件")
-    
     if not text_content:
         print("所有文件为空，使用默认文本")
         return [
@@ -136,56 +134,38 @@ def load_text_from_story_folder():
 # 替换原来的 test_text 定义
 test_text = load_text_from_story_folder()
 
-def process_tts(token, output_path, test_text, story_title=None, sentence_number=None, total_sentences=None):
+def process_tts(token, test_text, story_title=None, sentence_number=None, total_sentences=None):
     """
     处理文本到语音的转换
     
-    使用阿里云语音合成服务将文本转换为语音，并实时播放或保存为WAV文件。
+    使用阿里云语音合成服务将文本转换为语音，并返回音频数据。
     
     Args:
         token (str): 阿里云语音合成服务的访问Token
-        output_path (str): 输出音频文件的路径（当SAVE_TO_FILE为True时使用）
         test_text (list): 要转换的文本列表
         story_title (str, optional): 故事标题，用于控制台输出
         sentence_number (int, optional): 当前句子编号，用于控制台输出
         total_sentences (int, optional): 总句子数，用于控制台输出
         
     Returns:
-        None
+        bytes: 生成的WAV音频数据
     """
-    file = None
-    player = None
-    stream = None
-    # 创建一个事件标志，用于通知播放完成
+    # 创建一个内存缓冲区来存储音频数据
+    import io
+    audio_buffer = io.BytesIO()
+    
+    # 创建一个事件标志，用于通知合成完成
     completed = False
     
     try:
-        # 如果需要保存到文件，打开文件句柄
-        if SAVE_TO_FILE:
-            file = open(output_path, "wb")
-        
-        # 如果需要实时播放，初始化PyAudio
-        if PLAY_REALTIME_RESULT:
-            player = pyaudio.PyAudio()
-            stream = player.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=24000,
-                output=True,
-                frames_per_buffer=1024
-            )
-
-        # 在控制台显示播放信息 - 简化输出
+        # 在控制台显示生成信息
         if story_title and sentence_number and total_sentences:
-            print(f"播放: 【{story_title}】 {sentence_number}/{total_sentences}: {test_text[0]}")
+            print(f"生成语音: 【{story_title}】 {sentence_number}/{total_sentences}: {test_text[0]}")
 
         def test_on_data(data, *args):
             """数据回调函数，处理接收到的音频数据"""
-            nonlocal stream, file
-            if SAVE_TO_FILE and file:
-                file.write(data)
-            if PLAY_REALTIME_RESULT and stream:
-                stream.write(data)
+            nonlocal audio_buffer
+            audio_buffer.write(data)
 
         def test_on_message(message, *args):
             """消息回调函数，处理接收到的消息"""
@@ -197,7 +177,6 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
             """关闭回调函数，处理连接关闭事件"""
             nonlocal completed
             completed = True
-            # 移除完成播放的输出信息
 
         def test_on_error(message, *args):
             """错误回调函数，处理错误事件"""
@@ -216,7 +195,6 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
             callback_args=[]                                        # 回调函数的额外参数
         )
 
-        start_time = time.time()
         # 处理每个文本片段
         for text in test_text:
             # 开始语音合成
@@ -231,7 +209,6 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
                 pitch_rate=0,             # 音调，0表示正常音调
             )
             
-            # 使用回调机制等待播放完成，而不是预估时间
             # 等待语音合成完成（通过回调设置completed标志）
             max_wait = 30  # 最大等待时间，秒
             wait_start = time.time()
@@ -241,15 +218,13 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
         # 关闭SDK连接
         sdk.shutdown()
         
+        # 获取缓冲区中的所有数据
+        audio_data = audio_buffer.getvalue()
+        return audio_data
+        
     finally:
-        # 清理资源
-        if SAVE_TO_FILE and file:
-            file.close()
-        if PLAY_REALTIME_RESULT and stream:
-            stream.stop_stream()
-            stream.close()
-        if PLAY_REALTIME_RESULT and player:
-            player.terminate()
+        # 确保关闭缓冲区
+        audio_buffer.close()
 
 if __name__ == "__main__":
     # 首先获取Token
@@ -257,14 +232,6 @@ if __name__ == "__main__":
     if not token:
         print("Failed to get token. Exiting...")
         exit(1)
-
-    # 获取story文件夹路径
-    story_folder = get_story_folder()
-    if not os.path.exists(story_folder):
-        print("未找到story文件夹，将在当前目录创建输出文件")
-        base_path = "output_{}.wav"
-    else:
-        base_path = os.path.join(story_folder, "voice_{}.wav")
 
     # 获取要处理的文本
     sentences = load_text_from_story_folder()
@@ -276,9 +243,18 @@ if __name__ == "__main__":
 
     # 为每句话单独处理TTS转换
     for index, text in enumerate(sentences, 1):
-        # 使用序号创建唯一的文件名
-        output_path = base_path.format(f"{index:03d}")  # 使用3位数字格式化，如001, 002等
-        print(f"正在处理第 {index} 句话，输出至: {output_path}")
+        print(f"正在处理第 {index} 句话")
         
         # 每句话单独调用TTS转换
-        process_tts(token, output_path, [text], story_title="示例故事", sentence_number=index, total_sentences=len(sentences))
+        audio_data = process_tts(token, [text], story_title="示例故事", sentence_number=index, total_sentences=len(sentences))
+        
+        # 如果需要测试播放，可以临时保存并播放
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            temp_file.write(audio_data)
+            temp_path = temp_file.name
+        
+        print(f"音频数据大小: {len(audio_data)} 字节")
+        print(f"临时保存到: {temp_path}")
+        
+        # 可以在这里添加播放代码进行测试

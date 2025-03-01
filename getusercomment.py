@@ -151,11 +151,9 @@ def _monitor_comments(live_url, callback_function):
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])  # 排除自动化开关
     chrome_options.add_experimental_option("useAutomationExtension", False)  # 不使用自动化扩展
 
-    print("正在初始化Chrome浏览器...")
 
     try:
         # 初始化Chrome浏览器，使用Chrome自带的驱动机制
-        print("尝试使用Chrome浏览器内置驱动启动...")
         _driver = webdriver.Chrome(options=chrome_options)
         
         # 如果上面的方法失败，再尝试其他方式
@@ -170,24 +168,19 @@ def _monitor_comments(live_url, callback_function):
                 print("本地驱动不存在，请下载适合您Chrome版本的驱动并放置在项目目录")
                 print("您可以从 https://googlechromelabs.github.io/chrome-for-testing/ 下载驱动")
                 raise FileNotFoundError("ChromeDriver不存在")
-        
-        print(f"浏览器初始化状态: {'成功' if _driver else '失败'}")
+
         
         # 设置页面加载超时时间
         _driver.set_page_load_timeout(60)
         
         # 设置要访问的直播间URL
-        print(f"正在访问直播间: {live_url}")
         _driver.get(live_url)
         
         try:
             # 等待页面加载完成
-            print("等待页面加载完成...")
             WebDriverWait(_driver, 30).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
             )
-            
-            print("页面已加载，正在查找评论区...")
             
             # 打印页面标题，用于调试
             print(f"页面标题: {_driver.title}")
@@ -212,10 +205,9 @@ def _monitor_comments(live_url, callback_function):
                 except:
                     print("无法获取iframe内容")
             else:
-                print("未找到iframe")
+                pass
             
             # 等待评论区加载完成
-            print("等待评论区加载...")
             comment_area = WebDriverWait(_driver, 30).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "[class*='webcast-chatroom___list']"))
             )
@@ -262,11 +254,12 @@ def _monitor_comments(live_url, callback_function):
                                 # 尝试添加到互动记录中，如果成功（不是重复的）则处理
                                 # 直接将回调函数传递给add_interaction，实现实时响应
                                 if add_interaction(interaction_type, username, content, callback_function=callback_function):
-                                    # 简化输出格式，每条评论只打印一行
-                                    if interaction_type == "评论":
-                                        print(f"[评论] {username}: {content}")
-                                    else:
-                                        print(f"[礼物] {username} {content}")
+                                    pass
+                                    # 注释掉这些打印语句，避免重复打印
+                                    # if interaction_type == "评论":
+                                    #     print(f"[评论] {username}: {content}")
+                                    # else:
+                                    #     print(f"[礼物] {username} {content}")
                 except Exception as e:
                     print(f"获取评论时出错: {e}")
                 
