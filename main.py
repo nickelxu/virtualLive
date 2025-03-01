@@ -15,12 +15,9 @@ from getResponseFromQianwen import process_live_comment
 
 # 配置参数
 USE_PYGAME = False  # 设置为 False 使用虚拟声卡播放，让直播伴侣可以捕获音频
-# 虚拟声卡输出设备ID， 如需更改请修改此值
 # 注意：请使用 list_devices() 函数查看您系统中的设备列表，找到虚拟声卡的ID
 # 对于抖音直播伴侣：请在抖音直播伴侣中选择与此虚拟声卡相同的音频输入设备
 VIRTUAL_OUTPUT_DEVICE_ID = 17  # CABLE Input (VB-Audio Virtual Cable), Windows DirectSound
-
-# 直播间URL需要通过命令行参数提供，不再硬编码
 
 # 初始化 pygame 混音器
 pygame.mixer.init()
@@ -101,24 +98,6 @@ async def play_audio(audio_file_path):
     else:
         await asyncio.to_thread(play_wav_file_virtual, audio_file_path, VIRTUAL_OUTPUT_DEVICE_ID)
 
-def get_latest_audio_file(folder_path):
-    """
-    获取指定文件夹中最新的WAV文件。
-    
-    搜索指定文件夹中所有以'voice_'开头且以'.wav'结尾的文件，
-    并返回按文件名排序后的最新文件的完整路径。
-    
-    Args:
-        folder_path (str): 要搜索的文件夹路径
-        
-    Returns:
-        str or None: 最新WAV文件的完整路径，如果没有找到则返回None
-    """
-    audio_files = [f for f in os.listdir(folder_path) if f.startswith('voice_') and f.endswith('.wav')]
-    if not audio_files:
-        return None
-    return os.path.join(folder_path, sorted(audio_files)[-1])
-
 def load_story_files(folder_path):
     """
     从文件夹中读取所有故事文本文件。
@@ -167,38 +146,6 @@ def split_into_sentences(text):
                 sentence += '。'
             sentences.append(sentence)
     return sentences
-
-def find_virtual_audio_device():
-    """
-    帮助用户找到虚拟声卡设备。
-    
-    此函数列出所有音频设备，并提供指导帮助用户找到合适的虚拟声卡设备ID。
-    对于抖音直播伴侣，用户需要选择同一个虚拟声卡作为音频输入。
-    
-    Returns:
-        None: 直接打印设备信息和指导到控制台
-    """
-    print("\n" + "="*80)
-    print("虚拟声卡设置指南")
-    print("="*80)
-    print("1. 以下是您系统中的所有音频设备:")
-    devices = sd.query_devices()
-    for i, device in enumerate(devices):
-        print(f"   设备 {i}: {device['name']} ({'输入' if device['max_input_channels'] > 0 else ''}{'输出' if device['max_output_channels'] > 0 else ''})")
-    
-    print("\n2. 如何选择正确的虚拟声卡:")
-    print("   - 寻找带有 'Virtual', 'VB-Audio', 'Soundflower' 等关键词的设备")
-    print("   - 确保选择的是输出设备（有'输出'标记）")
-    print(f"   - 当前配置的虚拟声卡设备ID是: {VIRTUAL_OUTPUT_DEVICE_ID}")
-    
-    print("\n3. 如何配置抖音直播伴侣:")
-    print("   - 在抖音直播伴侣中，选择与上面相同的虚拟声卡作为音频输入")
-    print("   - 这样，本程序输出的音频就会被抖音直播伴侣捕获并播放")
-    
-    print("\n4. 如何修改设置:")
-    print("   - 如需更改虚拟声卡设备ID，请修改main.py中的VIRTUAL_OUTPUT_DEVICE_ID值")
-    print("   - 如果您没有虚拟声卡，可以将USE_PYGAME设置为True，但这样抖音直播伴侣将无法捕获音频")
-    print("="*80 + "\n")
 
 def comment_handler(username, comment_text, comment_type="评论"):
     """
@@ -353,7 +300,6 @@ async def play_stories():
                     f"voice_{story_id}_{i:03d}.wav"
                 )
                 
-                # 简化输出，不再打印分隔线和进度信息
                 # 使用直接播放模式，传递故事标题和句子信息
                 process_tts(
                     token, 

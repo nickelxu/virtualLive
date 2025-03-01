@@ -1,16 +1,6 @@
 """
 抖音直播评论和礼物抓取模块
-
-此模块用于从抖音直播页面抓取实时评论和礼物信息。
-使用Selenium模拟浏览器访问直播页面，解析并提取评论和礼物信息。
-
-主要功能：
-1. 自动访问指定的抖音直播页面
-2. 实时抓取观众发送的评论
-3. 实时抓取观众赠送的礼物
-4. 解析并格式化评论和礼物信息
-
-作者: nickelxu
+用于从抖音直播页面抓取实时评论和礼物信息
 """
 
 import asyncio
@@ -42,16 +32,7 @@ _interaction_keys = set()  # 用于快速检查重复
 
 @contextmanager
 def suppress_stderr():
-    """
-    上下文管理器，用于临时抑制标准错误输出
-    
-    在执行可能产生大量无关警告的代码时使用，
-    例如WebGL相关警告或Selenium的调试信息
-    
-    用法:
-        with suppress_stderr():
-            # 可能产生大量stderr输出的代码
-    """
+    """上下文管理器，用于临时抑制标准错误输出"""
     # 保存当前的标准错误
     original_stderr = sys.stderr
     
@@ -72,18 +53,7 @@ def suppress_stderr():
         sys.stderr = original_stderr
 
 def parse_comment(comment):
-    """
-    解析评论文本，提取用户名和评论内容
-    
-    从评论文本中分离出用户名和评论内容，格式通常为"用户名:评论内容"。
-    如果无法分离，则将整个文本作为评论内容返回。
-    
-    Args:
-        comment (str): 原始评论文本
-        
-    Returns:
-        tuple: 包含类型("评论")、用户名和评论内容的元组
-    """
+    """解析评论文本，提取用户名和评论内容"""
     match = re.match(r'^(.*?)[:：](.*)', comment)
     if match:
         return "评论", match.group(1).strip(), match.group(2).strip()
@@ -92,18 +62,7 @@ def parse_comment(comment):
 
 
 def parse_gift(gift):
-    """
-    解析礼物文本，提取赠送者和礼物信息
-    
-    从礼物文本中分离出赠送者和礼物信息，格式通常为"用户名送出了礼物名称"。
-    如果无法分离，则将整个文本作为礼物信息返回。
-    
-    Args:
-        gift (str): 原始礼物文本
-        
-    Returns:
-        tuple: 包含类型("礼物")、赠送者和礼物信息的元组
-    """
+    """解析礼物文本，提取赠送者和礼物信息"""
     match = re.match(r'^(.*?)送出了(.*)', gift)
     if match:
         return "礼物", match.group(1).strip(), f"送出了{match.group(2).strip()}"
@@ -154,33 +113,18 @@ def add_interaction(interaction_type, username, content, timestamp=None, callbac
     return True
 
 def get_all_interactions():
-    """
-    获取所有互动记录
-    
-    Returns:
-        list: 包含所有互动记录的列表
-    """
+    """获取所有互动记录"""
     global _all_interactions
     return _all_interactions
 
 def clear_interactions():
-    """
-    清空互动记录
-    """
+    """清空互动记录"""
     global _all_interactions, _interaction_keys
     _all_interactions = []
     _interaction_keys = set()
 
 def _monitor_comments(live_url, callback_function):
-    """
-    监控直播评论的内部函数
-    
-    持续监控直播间评论，并通过回调函数处理新评论
-    
-    Args:
-        live_url (str): 直播间URL
-        callback_function (function): 处理评论的回调函数，接收用户名、评论内容和评论类型参数
-    """
+    """监控直播评论的内部函数"""
     global _driver, _stop_monitoring
     
     # 配置Chrome浏览器选项
@@ -360,18 +304,7 @@ def _monitor_comments(live_url, callback_function):
             print("关闭浏览器时出错")
 
 def start_comment_monitoring(live_url, callback_function):
-    """
-    启动评论监控线程
-    
-    创建并启动一个新线程来监控直播评论
-    
-    Args:
-        live_url (str): 直播间URL
-        callback_function (function): 处理评论的回调函数
-        
-    Returns:
-        bool: 是否成功启动监控
-    """
+    """启动评论监控线程"""
     global _monitoring_thread, _stop_monitoring, _driver
     
     # 确保驱动为None，以便在新线程中重新初始化
@@ -402,14 +335,7 @@ def start_comment_monitoring(live_url, callback_function):
     return True
 
 def stop_comment_monitoring():
-    """
-    停止评论监控线程
-    
-    设置停止标志并等待监控线程结束
-    
-    Returns:
-        bool: 是否成功停止监控
-    """
+    """停止评论监控线程"""
     global _monitoring_thread, _stop_monitoring, _driver
     
     if not _monitoring_thread or not _monitoring_thread.is_alive():
@@ -433,41 +359,5 @@ def stop_comment_monitoring():
     print("评论监控已停止")
     return True
 
-def main():
-    """
-    主函数，用于测试模块功能
-    
-    启动评论监控并打印收到的评论
-    必须通过命令行参数指定直播间URL
-    """
-    def test_callback(username, comment, comment_type):
-        print(f"收到{comment_type}: {username} - {comment}")
-    
-    # 检查是否提供了命令行参数
-    if len(sys.argv) > 1:
-        live_url = sys.argv[1]
-        print(f"使用直播间URL: {live_url}")
-        
-        # 启动评论监控
-        start_comment_monitoring(live_url, test_callback)
-        
-        try:
-            # 运行60秒后停止
-            print("监控将在60秒后自动停止...")
-            time.sleep(60)
-            
-            # 打印收集到的所有互动
-            interactions = get_all_interactions()
-            print(f"\n共收集到 {len(interactions)} 条互动记录:")
-            for idx, interaction in enumerate(interactions, 1):
-                print(f"{idx}. [{interaction['type']}] {interaction['username']}: {interaction['content']}")
-        finally:
-            # 确保停止监控
-            stop_comment_monitoring()
-    else:
-        print("错误: 未指定直播间URL")
-        print("用法: python getusercomment.py https://live.douyin.com/您的直播间ID")
-        sys.exit(1)
-
 if __name__ == "__main__":
-    main()
+    print("此模块不应直接运行，请通过main.py启动程序")

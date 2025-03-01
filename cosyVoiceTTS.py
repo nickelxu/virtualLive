@@ -1,21 +1,7 @@
 # coding=utf-8
 """
 阿里云语音合成服务模块
-
-此模块用于将文本转换为语音，使用阿里云的语音合成服务。
-主要功能包括：
-1. 从story文件夹中读取内容
-2. 将文本内容转换为语音
-3. 保存语音为WAV文件或实时播放
-4. 获取阿里云语音合成服务的访问Token
-
-安装说明：
-- APPLE Mac OS X: brew install portaudio && pip install pyaudio
-- Debian/Ubuntu: sudo apt-get install python-pyaudio python3-pyaudio 或 pip install pyaudio
-- CentOS: sudo yum install -y portaudio portaudio-devel && pip install pyaudio
-- Microsoft Windows: python -m pip install pyaudio
-
-作者: nickelxu
+将文本转换为语音，使用阿里云的语音合成服务
 """
 
 # 阿里云语音合成服务相关链接
@@ -56,18 +42,7 @@ if PLAY_REALTIME_RESULT:
     import pyaudio
 
 def get_token():
-    """
-    获取阿里云语音合成服务的访问Token
-    
-    使用阿里云SDK从元数据服务获取语音合成服务的访问Token。
-    需要在环境变量中设置ALIYUN_AK_ID和ALIYUN_AK_SECRET。
-    
-    Returns:
-        str or None: 成功返回Token字符串，失败返回None
-        
-    Raises:
-        Exception: 当API响应中没有找到Token时抛出异常
-    """
+    """获取阿里云语音合成服务的访问Token"""
     # 创建AcsClient实例，用于与阿里云API通信
     client = AcsClient(
         os.getenv('ALIYUN_AK_ID'),        # 阿里云AccessKey ID
@@ -98,14 +73,7 @@ def get_token():
         return None
 
 def get_story_folder():
-    """
-    获取story文件夹路径
-    
-    返回项目根目录中的story文件夹路径。如果不存在则创建该文件夹。
-    
-    Returns:
-        str: story文件夹的完整路径
-    """
+    """获取story文件夹路径"""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     story_folder = os.path.join(current_dir, "story")
     if not os.path.exists(story_folder):
@@ -113,15 +81,7 @@ def get_story_folder():
     return story_folder
 
 def load_text_from_story_folder():
-    """
-    从story文件夹中读取所有txt文件的内容
-    
-    读取story文件夹中的所有文本文件，将内容按句子分割，并返回句子列表。
-    如果没有找到文件或内容为空，则返回默认文本。
-    
-    Returns:
-        list: 文本句子列表
-    """
+    """从story文件夹中读取所有txt文件的内容"""
     story_folder = get_story_folder()
     if not os.path.exists(story_folder):
         print("未找到story文件夹，使用默认文本")
@@ -220,15 +180,7 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
             print(f"播放: 【{story_title}】 {sentence_number}/{total_sentences}: {test_text[0]}")
 
         def test_on_data(data, *args):
-            """
-            数据回调函数，处理接收到的音频数据
-            
-            当接收到音频数据时，将数据写入文件或发送到音频播放设备。
-            
-            Args:
-                data (bytes): 接收到的音频数据
-                *args: 其他参数
-            """
+            """数据回调函数，处理接收到的音频数据"""
             nonlocal stream, file
             if SAVE_TO_FILE and file:
                 file.write(data)
@@ -236,38 +188,19 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
                 stream.write(data)
 
         def test_on_message(message, *args):
-            """
-            消息回调函数，处理接收到的消息
-            
-            注意：当前SDK版本不再支持on_message回调，此函数保留仅供参考。
-            
-            Args:
-                message: 接收到的消息
-                *args: 其他参数
-            """
+            """消息回调函数，处理接收到的消息"""
             # 只在调试模式下打印消息
             if "debug" in str(message).lower():
                 print("on message=>{}".format(message))
 
         def test_on_close(*args):
-            """
-            关闭回调函数，处理连接关闭事件
-            
-            Args:
-                *args: 其他参数
-            """
+            """关闭回调函数，处理连接关闭事件"""
             nonlocal completed
             completed = True
             # 移除完成播放的输出信息
 
         def test_on_error(message, *args):
-            """
-            错误回调函数，处理错误事件
-            
-            Args:
-                message: 错误消息
-                *args: 其他参数
-            """
+            """错误回调函数，处理错误事件"""
             nonlocal completed
             completed = True
             print("on_error message=>{} args=>{}".format(message, args))
@@ -304,8 +237,6 @@ def process_tts(token, output_path, test_text, story_title=None, sentence_number
             wait_start = time.time()
             while not completed and time.time() - wait_start < max_wait:
                 time.sleep(0.01)  # 短暂睡眠，避免CPU使用率过高
-            
-            # 移除句子实际用时的输出
 
         # 关闭SDK连接
         sdk.shutdown()
