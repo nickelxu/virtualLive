@@ -2,34 +2,51 @@ import asyncio
 import os
 import threading
 import time
+import sys
 from datetime import datetime
 from cosyVoiceTTS import process_tts, get_token
 import sounddevice as sd
 import soundfile as sf
 import pygame
 import queue
+import importlib
 from getusercomment import start_comment_monitoring, stop_comment_monitoring
 from getResponseFromQianwen import process_live_comment
 
+# 导入代码热重载模块
+try:
+    from code_reloader import start_monitoring, stop_monitoring
+    HAS_CODE_RELOADER = True
+except ImportError:
+    print("提示: 没有找到code_reloader模块，代码热重载功能将被禁用")
+    print("如需启用代码热重载，请先安装watchdog库: pip install watchdog")
+    HAS_CODE_RELOADER = False
+
 # 配置参数
-USE_PYGAME = True  # 设置为 True 使用 pygame 播放，False 使用虚拟声卡
+USE_PYGAME = False  # 设置为 False 使用虚拟声卡播放，让直播伴侣可以捕获音频
 # 虚拟声卡输出设备ID， 如需更改请修改此值
 # 注意：请使用 list_devices() 函数查看您系统中的设备列表，找到虚拟声卡的ID
 # 对于抖音直播伴侣：请在抖音直播伴侣中选择与此虚拟声卡相同的音频输入设备
-VIRTUAL_OUTPUT_DEVICE_ID = 17
+VIRTUAL_OUTPUT_DEVICE_ID = 17  # CABLE Input (VB-Audio Virtual Cable), Windows DirectSound
 
-# 直播间URL，可以根据需要修改
-DOUYIN_LIVE_URL = "https://live.douyin.com/373297491977"
+# 是否启用代码热重载功能 (允许直播过程中更新代码)
+ENABLE_HOT_RELOAD = True
+
+# 直播间URL需要通过命令行参数提供，不再硬编码
 
 # 初始化 pygame 混音器
 pygame.mixer.init()
 
-# 创建一个队列用于存储用户评论
-comment_queue = queue.Queue()
-
 # 创建一个事件用于控制故事播放和评论处理的协调
 story_paused = threading.Event()
 story_paused.clear()  # 初始状态为不暂停
+
+# 全局变量，用于热重载后恢复状态
+global_token = None
+# 互动处理锁，防止多个互动同时处理导致冲突
+interaction_lock = threading.Lock()
+# 当前是否正在处理互动
+is_processing_interaction = False
 
 def list_devices():
     """
@@ -308,84 +325,130 @@ def find_virtual_audio_device():
     print("   - 如果您没有虚拟声卡，可以将USE_PYGAME设置为True，但这样抖音直播伴侣将无法捕获音频")
     print("="*80 + "\n")
 
+async def process_interaction(username, comment_text, comment_type="评论"):
+    """
+    处理用户互动
+    
+    使用千问AI生成回复，并播放回复语音
+    
+    Args:
+        username (str): 用户名
+        comment_text (str): 评论内容
+        comment_type (str): 互动类型，默认为"评论"
+    """
+    global is_processing_interaction, global_token
+    
+    # 使用锁确保同一时间只处理一个互动
+    with interaction_lock:
+        # 设置正在处理互动的标志
+        is_processing_interaction = True
+        
+        try:
+            # 暂停故事播放，让AI回复评论
+            story_paused.set()
+            
+            print(f"\n{'='*50}")
+            print(f"处理{comment_type}: {username}: {comment_text}")
+            
+            # 使用千问AI生成回复
+            system_prompt = "你是一个友好、幽默的直播助手，负责回答直播间观众的问题和评论。回复要简洁、有趣，不超过50个字。"
+            if comment_type == "礼物":
+                system_prompt += "这是一个礼物，请表达感谢。"
+            
+            response = process_live_comment(f"{username}: {comment_text}", system_prompt)
+            
+            print(f"AI回复: {response}")
+            
+            # 生成回复语音
+            temp_output_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "story",
+                f"response_{int(time.time())}.wav"
+            )
+            
+            # 获取token，如果全局token不可用则重新获取
+            token = global_token
+            if not token:
+                token = get_token()
+                if token:
+                    # 如果成功获取了新token，更新全局token
+                    global_token = token
+            
+            if not token:
+                print("无法获取语音token，跳过语音生成")
+                return
+            
+            # 使用TTS生成语音
+            process_tts(
+                token,
+                temp_output_path,
+                [response],
+                story_title=f"回复{username}",
+                sentence_number=1,
+                total_sentences=1
+            )
+            
+            # 播放语音回复
+            if os.path.exists(temp_output_path):
+                if USE_PYGAME:
+                    play_wav_file_pygame(temp_output_path)
+                else:
+                    play_wav_file_virtual(temp_output_path, VIRTUAL_OUTPUT_DEVICE_ID)
+            else:
+                print(f"警告: 语音文件未生成: {temp_output_path}")
+            
+            print(f"{'='*50}\n")
+        except Exception as e:
+            print(f"处理互动时出错: {str(e)}")
+        finally:
+            # 处理完成后，恢复故事播放
+            story_paused.clear()
+            # 重置处理标志
+            is_processing_interaction = False
+
 def comment_handler(username, comment_text, comment_type="评论"):
     """
     处理直播间评论的回调函数
     
-    当收到直播间评论时，将评论放入队列并暂停故事播放
+    当收到直播间评论时，直接处理评论而不是放入队列
     
     Args:
         username (str): 评论用户名
         comment_text (str): 评论内容
         comment_type (str): 评论类型，默认为"评论"
     """
-    # 将评论信息放入队列
-    comment_queue.put((username, comment_text, comment_type))
-    
-    # 暂停故事播放，让AI回复评论
-    story_paused.set()
-
-async def process_comments():
-    """
-    异步处理评论队列中的评论
-    
-    从评论队列中获取评论，使用千问AI生成回复，并播放回复语音
-    """
-    print("开始评论处理线程")
-    
-    # 获取语音token
-    token = get_token()
-    if not token:
-        print("获取语音token失败，无法处理评论")
+    # 如果已经在处理互动，则跳过
+    if is_processing_interaction:
+        print(f"正在处理其他互动，跳过: {username}: {comment_text}")
         return
     
-    while True:
-        try:
-            # 检查队列中是否有评论
-            if not comment_queue.empty():
-                # 获取评论信息
-                username, comment_text, comment_type = comment_queue.get()
-                
-                print(f"\n{'='*50}")
-                print(f"收到{comment_type}: {username}: {comment_text}")
-                
-                # 使用千问AI生成回复
-                system_prompt = "你是一个友好、幽默的直播助手，负责回答直播间观众的问题和评论。回复要简洁、有趣，不超过50个字。"
-                if comment_type == "礼物":
-                    system_prompt += "这是一个礼物，请表达感谢。"
-                
-                response = process_live_comment(f"{username}: {comment_text}", system_prompt)
-                
-                print(f"AI回复: {response}")
-                
-                # 生成回复语音
-                temp_output_path = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    "story",
-                    f"response_{int(time.time())}.wav"
-                )
-                
-                # 使用TTS生成语音
-                process_tts(
-                    token,
-                    temp_output_path,
-                    [response],
-                    story_title=f"回复{username}",
-                    sentence_number=1,
-                    total_sentences=1
-                )
-                
-                # 播放完评论回复后，恢复故事播放
-                story_paused.clear()
-                
-                print(f"{'='*50}\n")
-            
-            # 短暂休眠，避免CPU占用过高
-            await asyncio.sleep(0.1)
-            
-        except Exception as e:
-            print(f"处理评论时出错: {str(e)}")
-            await asyncio.sleep(1)  # 出错时稍微长一点的休眠
+    # 使用线程来处理互动，而不是尝试创建异步任务
+    # 这是因为comment_handler是在非异步环境中被调用的
+    threading.Thread(
+        target=lambda: asyncio.run(process_interaction(username, comment_text, comment_type)),
+        daemon=True
+    ).start()
+
+# 当模块重新加载时的回调函数
+def on_module_reloaded(module_name):
+    """
+    当模块被重新加载时，这个函数会被调用。
+    可以在这里执行一些状态恢复或特殊处理。
+    
+    Args:
+        module_name (str): 被重新加载的模块名
+    """
+    print(f"\n{'='*50}")
+    print(f"模块 {module_name} 已成功热重载!")
+    print(f"{'='*50}\n")
+    
+    # 这里可以添加针对特定模块的处理逻辑
+    if module_name == "cosyVoiceTTS":
+        print("语音合成模块已更新，将在下一次合成时使用新版本")
+    elif module_name == "getResponseFromQianwen":
+        print("AI响应模块已更新，将在下一次生成回复时使用新版本")
+    elif module_name == "getusercomment":
+        print("评论获取模块已更新，请考虑重启程序以完全应用更改")
 
 async def play_stories():
     """
@@ -398,12 +461,10 @@ async def play_stories():
         # 获取当前目录
         current_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # 获取语音转换token
-        print("正在获取语音转换token...")
-        token = get_token()
+        # 获取语音转换token，优先使用全局token
+        token = global_token or get_token()
         if not token:
             raise Exception("获取token失败")
-        print("成功获取语音token")
         
         # 使用story文件夹
         story_folder = os.path.join(current_dir, "story")
@@ -473,15 +534,26 @@ async def main():
     2. 清理story文件夹中的旧文件
     3. 清理旧版本的日期文件夹（兼容旧版本）
     4. 启动直播评论监控
-    5. 启动评论处理协程
-    6. 启动故事播放协程
+    5. 启动故事播放协程
     
     整个过程是异步的，使用asyncio协程实现。
     
     Raises:
         Exception: 如果在执行过程中发生错误
     """
+    global global_token
+    
     try:
+        # 检查是否提供了直播间URL
+        if len(sys.argv) <= 1:
+            print("错误: 未指定直播间URL")
+            print("用法: python main.py https://live.douyin.com/您的直播间ID")
+            sys.exit(1)
+            
+        # 获取直播间URL
+        douyin_live_url = sys.argv[1]
+        print(f"使用直播间URL: {douyin_live_url}")
+        
         print("列出所有音频设备，确保虚拟声卡设置正确：")
         list_devices()
         
@@ -501,24 +573,45 @@ async def main():
         delete_old_folders(current_dir)
         print("旧版本文件夹检查完成")
         
+        # 启用代码热重载功能 (允许直播过程中更新代码)
+        if ENABLE_HOT_RELOAD and HAS_CODE_RELOADER:
+            print("\n正在启动代码热重载监控...")
+            # 指定需要监控的模块
+            modules_to_watch = [
+                "cosyVoiceTTS",
+                "getResponseFromQianwen", 
+                "getusercomment"
+            ]
+            # 启动代码重载监控
+            start_monitoring(modules_to_watch, on_module_reloaded)
+            print("代码热重载监控已启动，您可以在直播过程中修改代码")
+            print("支持热重载的模块: " + ", ".join(modules_to_watch))
+            print("注意: 某些更改可能需要重启程序才能完全生效")
+        
+        # 获取语音转换token并保存到全局变量，方便热重载后使用
+        print("正在获取语音转换token...")
+        global_token = get_token()
+        if not global_token:
+            raise Exception("获取token失败")
+        print("成功获取语音token")
+        
         # 3. 启动直播评论监控
         print("\n启动直播评论监控...")
-        start_comment_monitoring(DOUYIN_LIVE_URL, comment_handler)
+        start_comment_monitoring(douyin_live_url, comment_handler)
         
-        # 4. 创建并启动评论处理任务
-        comment_task = asyncio.create_task(process_comments())
-        
-        # 5. 创建并启动故事播放任务
+        # 4. 创建并启动故事播放任务
         story_task = asyncio.create_task(play_stories())
         
-        # 等待所有任务完成
-        await asyncio.gather(comment_task, story_task)
+        # 等待故事播放任务完成
+        await story_task
             
     except Exception as e:
         print(f"运行出错：{str(e)}")
     finally:
-        # 确保停止评论监控
+        # 确保停止评论监控和代码监控
         stop_comment_monitoring()
+        if ENABLE_HOT_RELOAD and HAS_CODE_RELOADER:
+            stop_monitoring()
 
 if __name__ == "__main__":
     # 运行主函数

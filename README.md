@@ -47,10 +47,10 @@ DASHSCOPE_API_KEY="您的千问API密钥"
 
 ### 配置直播间
 
-在 `main.py` 中修改 `DOUYIN_LIVE_URL` 变量，设置为您的抖音直播间URL：
+直播间URL需要通过命令行参数提供，不再需要修改源代码：
 
-```python
-DOUYIN_LIVE_URL = "https://live.douyin.com/您的直播间ID"
+```bash
+python main.py https://live.douyin.com/您的直播间ID
 ```
 
 ### 配置虚拟声卡（可选）
@@ -65,7 +65,7 @@ DOUYIN_LIVE_URL = "https://live.douyin.com/您的直播间ID"
 ### 运行系统
 
 ```bash
-python main.py
+python main.py https://live.douyin.com/您的直播间ID
 ```
 
 ## 工作流程

@@ -13,6 +13,15 @@
 作者: nickelxu
 """
 
+import asyncio
+import os
+import threading
+import time
+import random
+import re
+import sys
+import subprocess
+from contextlib import contextmanager
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -21,15 +30,46 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
-import time
-import random
-import re
-import threading
 
 # 全局变量，用于控制评论监控线程
 _monitoring_thread = None
 _stop_monitoring = False
 _driver = None
+
+# 全局变量，用于存储所有互动记录
+_all_interactions = []
+_interaction_keys = set()  # 用于快速检查重复
+
+@contextmanager
+def suppress_stderr():
+    """
+    上下文管理器，用于临时抑制标准错误输出
+    
+    在执行可能产生大量无关警告的代码时使用，
+    例如WebGL相关警告或Selenium的调试信息
+    
+    用法:
+        with suppress_stderr():
+            # 可能产生大量stderr输出的代码
+    """
+    # 保存当前的标准错误
+    original_stderr = sys.stderr
+    
+    try:
+        # 如果是Windows系统
+        if sys.platform.startswith('win'):
+            # 将标准错误重定向到NUL设备
+            with open('NUL', 'w') as devnull:
+                sys.stderr = devnull
+                yield
+        else:
+            # 对于Unix/Linux/Mac系统，重定向到/dev/null
+            with open('/dev/null', 'w') as devnull:
+                sys.stderr = devnull
+                yield
+    finally:
+        # 恢复原始的标准错误
+        sys.stderr = original_stderr
 
 def parse_comment(comment):
     """
@@ -70,6 +110,67 @@ def parse_gift(gift):
     else:
         return "礼物", "", gift.strip()
 
+def add_interaction(interaction_type, username, content, timestamp=None, callback_function=None):
+    """
+    将互动添加到全局数据结构中，避免重复
+    
+    Args:
+        interaction_type (str): 互动类型，如"评论"或"礼物"
+        username (str): 用户名
+        content (str): 互动内容
+        timestamp (float, optional): 时间戳，默认为当前时间
+        callback_function (function, optional): 处理互动的回调函数
+        
+    Returns:
+        bool: 是否成功添加（True表示新增，False表示重复）
+    """
+    global _all_interactions, _interaction_keys
+    
+    # 生成唯一键
+    interaction_key = f"{username}:{content}"
+    
+    # 检查是否已存在
+    if interaction_key in _interaction_keys:
+        return False
+    
+    # 添加到集合中，用于快速查重
+    _interaction_keys.add(interaction_key)
+    
+    # 创建互动记录
+    interaction = {
+        "type": interaction_type,
+        "username": username,
+        "content": content,
+        "timestamp": timestamp or time.time()
+    }
+    
+    # 添加到列表中
+    _all_interactions.append(interaction)
+    
+    # 如果提供了回调函数，立即调用
+    if callback_function:
+        callback_function(username, content, interaction_type)
+    
+    return True
+
+def get_all_interactions():
+    """
+    获取所有互动记录
+    
+    Returns:
+        list: 包含所有互动记录的列表
+    """
+    global _all_interactions
+    return _all_interactions
+
+def clear_interactions():
+    """
+    清空互动记录
+    """
+    global _all_interactions, _interaction_keys
+    _all_interactions = []
+    _interaction_keys = set()
+
 def _monitor_comments(live_url, callback_function):
     """
     监控直播评论的内部函数
@@ -89,6 +190,12 @@ def _monitor_comments(live_url, callback_function):
     chrome_options.add_argument("--no-sandbox")  # 禁用沙箱模式
     chrome_options.add_argument("--disable-dev-shm-usage")  # 禁用/dev/shm使用
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")  # 禁用自动化控制检测
+    chrome_options.add_argument("--enable-unsafe-swiftshader")  # 启用SwiftShader软件渲染，解决WebGL警告
+    chrome_options.add_argument("--disable-software-rasterizer")  # 禁用软件光栅化器
+    chrome_options.add_argument("--log-level=3")  # 设置日志级别为3(ERROR)，减少日志输出
+    chrome_options.add_argument("--disable-logging")  # 禁用Chrome的日志记录
+    chrome_options.add_argument("--silent")  # 静默模式
+    chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])  # 禁用DevTools日志
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")  # 设置用户代理为最新版本
 
@@ -103,9 +210,24 @@ def _monitor_comments(live_url, callback_function):
     print("正在初始化Chrome浏览器...")
 
     try:
-        # 初始化Chrome浏览器，使用webdriver_manager自动管理ChromeDriver版本
-        service = Service(ChromeDriverManager().install())
-        _driver = webdriver.Chrome(service=service, options=chrome_options)
+        # 初始化Chrome浏览器，使用Chrome自带的驱动机制
+        print("尝试使用Chrome浏览器内置驱动启动...")
+        _driver = webdriver.Chrome(options=chrome_options)
+        
+        # 如果上面的方法失败，再尝试其他方式
+        if not _driver:
+            # 尝试显式指定一个驱动程序的路径
+            driver_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chromedriver.exe")
+            print(f"尝试使用本地驱动: {driver_path}")
+            if os.path.exists(driver_path):
+                service = Service(driver_path)
+                _driver = webdriver.Chrome(service=service, options=chrome_options)
+            else:
+                print("本地驱动不存在，请下载适合您Chrome版本的驱动并放置在项目目录")
+                print("您可以从 https://googlechromelabs.github.io/chrome-for-testing/ 下载驱动")
+                raise FileNotFoundError("ChromeDriver不存在")
+        
+        print(f"浏览器初始化状态: {'成功' if _driver else '失败'}")
         
         # 设置页面加载超时时间
         _driver.set_page_load_timeout(60)
@@ -184,21 +306,33 @@ def _monitor_comments(live_url, callback_function):
             print("评论区已加载")
             
             # 用于存储已处理过的评论，避免重复处理
-            seen_comments = set()  
+            seen_comments = set()
             
             # 持续监控评论区
             print("开始监控评论区...")
             while not _stop_monitoring:
                 try:
+                    # 检查驱动状态
+                    if _driver is None:
+                        print("错误: 浏览器驱动为None，尝试重新初始化...")
+                        break
+                        
                     # 使用JavaScript获取所有评论元素的文本内容
-                    comments = _driver.execute_script("""
-                        return Array.from(document.querySelectorAll('[class*="webcast-chatroom___item"]')).map(el => el.textContent);
-                    """)
+                    with suppress_stderr():
+                        comments = _driver.execute_script("""
+                            return Array.from(document.querySelectorAll('[class*="webcast-chatroom___item"]')).map(el => el.textContent);
+                        """)
                     
                     # 处理每条评论
                     for comment in comments:
                         if comment not in seen_comments:  # 检查是否已经处理过
                             seen_comments.add(comment)  # 添加到已处理集合中
+                            
+                            # 检查是否是合并的多条评论（通常很长且包含多个冒号）
+                            if len(comment) > 100 and comment.count('：') > 2:
+                                # 这可能是合并的多条评论，跳过处理
+                                # 因为这些评论会在后续单独出现
+                                continue
                             
                             # 根据内容判断是礼物还是评论
                             if "送出了" in comment:
@@ -206,15 +340,16 @@ def _monitor_comments(live_url, callback_function):
                             else:
                                 interaction_type, username, content = parse_comment(comment)
                             
-                            # 调用回调函数处理评论
-                            if callback_function and username and content:
-                                callback_function(username, content, interaction_type)
-                            
-                            # 格式化输出解析结果
-                            if interaction_type == "评论":
-                                print(f"[评论] {username}: {content}")
-                            else:
-                                print(f"[礼物] {username} {content}")
+                            # 如果用户名和内容都不为空，则添加到互动记录中
+                            if username and content:
+                                # 尝试添加到互动记录中，如果成功（不是重复的）则处理
+                                # 直接将回调函数传递给add_interaction，实现实时响应
+                                if add_interaction(interaction_type, username, content, callback_function=callback_function):
+                                    # 格式化输出解析结果
+                                    if interaction_type == "评论":
+                                        print(f"[评论] {username}: {content}")
+                                    else:
+                                        print(f"[礼物] {username} {content}")
                 except Exception as e:
                     print(f"获取评论时出错，跳过本次循环: {e}")
                 
@@ -264,7 +399,16 @@ def start_comment_monitoring(live_url, callback_function):
     Returns:
         bool: 是否成功启动监控
     """
-    global _monitoring_thread, _stop_monitoring
+    global _monitoring_thread, _stop_monitoring, _driver
+    
+    # 确保驱动为None，以便在新线程中重新初始化
+    if _driver is not None:
+        try:
+            _driver.quit()
+        except:
+            pass
+        _driver = None
+        print("已重置浏览器驱动，准备在新线程中重新初始化")
     
     # 如果已经有监控线程在运行，先停止它
     if _monitoring_thread and _monitoring_thread.is_alive():
@@ -321,20 +465,36 @@ def main():
     主函数，用于测试模块功能
     
     启动评论监控并打印收到的评论
+    必须通过命令行参数指定直播间URL
     """
     def test_callback(username, comment, comment_type):
         print(f"收到{comment_type}: {username} - {comment}")
     
-    # 启动评论监控
-    start_comment_monitoring("https://live.douyin.com/373297491977", test_callback)
-    
-    try:
-        # 运行60秒后停止
-        print("监控将在60秒后自动停止...")
-        time.sleep(60)
-    finally:
-        # 确保停止监控
-        stop_comment_monitoring()
+    # 检查是否提供了命令行参数
+    if len(sys.argv) > 1:
+        live_url = sys.argv[1]
+        print(f"使用直播间URL: {live_url}")
+        
+        # 启动评论监控
+        start_comment_monitoring(live_url, test_callback)
+        
+        try:
+            # 运行60秒后停止
+            print("监控将在60秒后自动停止...")
+            time.sleep(60)
+            
+            # 打印收集到的所有互动
+            interactions = get_all_interactions()
+            print(f"\n共收集到 {len(interactions)} 条互动记录:")
+            for idx, interaction in enumerate(interactions, 1):
+                print(f"{idx}. [{interaction['type']}] {interaction['username']}: {interaction['content']}")
+        finally:
+            # 确保停止监控
+            stop_comment_monitoring()
+    else:
+        print("错误: 未指定直播间URL")
+        print("用法: python getusercomment.py https://live.douyin.com/您的直播间ID")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
