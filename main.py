@@ -348,8 +348,9 @@ async def main():
     主函数，协调整个程序的执行流程。
     
     执行以下步骤：
-    1. 启动直播评论监控
-    2. 启动故事播放协程
+    1. 提示用户输入直播间URL，可选择跳过评论监控
+    2. 如果提供URL，启动直播评论监控
+    3. 启动故事播放协程
     
     整个过程是异步的，使用asyncio协程实现。
     
@@ -359,23 +360,21 @@ async def main():
     global global_token
     
     try:
-        # 检查是否提供了直播间URL
-        if len(sys.argv) <= 1:
-            print("错误: 未指定直播间URL")
-            print("用法: python main.py https://live.douyin.com/您的直播间ID")
-            sys.exit(1)
-            
-        # 获取直播间URL
-        douyin_live_url = sys.argv[1]
-        print(f"使用直播间URL: {douyin_live_url}")
+        # 提示用户输入直播间URL
+        print("请输入抖音直播间URL (直接按回车跳过，将不进行评论监控):")
+        douyin_live_url = input().strip()
         
         # 获取语音转换token并保存到全局变量
         global_token = get_token()
         if not global_token:
             raise Exception("获取token失败")
         
-        # 启动直播评论监控
-        start_comment_monitoring(douyin_live_url, comment_handler)
+        # 如果用户提供了URL，启动直播评论监控
+        if douyin_live_url:
+            print(f"使用直播间URL: {douyin_live_url}")
+            start_comment_monitoring(douyin_live_url, comment_handler)
+        else:
+            print("跳过评论监控，仅播放故事")
         
         # 创建并启动故事播放任务
         story_task = asyncio.create_task(play_stories())
@@ -386,8 +385,9 @@ async def main():
     except Exception as e:
         print(f"运行出错：{str(e)}")
     finally:
-        # 确保停止评论监控
-        stop_comment_monitoring()
+        # 如果启动了评论监控，确保停止
+        if 'douyin_live_url' in locals() and douyin_live_url:
+            stop_comment_monitoring()
 
 if __name__ == "__main__":
     # 运行主函数
