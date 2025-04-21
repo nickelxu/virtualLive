@@ -1,139 +1,84 @@
 # coding=utf-8
-"""
-阿里云语音合成服务模块
-将文本转换为语音，使用阿里云的语音合成服务
-"""
+#
+# Installation instructions for pyaudio:
+# APPLE Mac OS X
+#   brew install portaudio
+#   pip install pyaudio
+# Debian/Ubuntu
+#   sudo apt-get install python-pyaudio python3-pyaudio
+#   or
+#   pip install pyaudio
+# CentOS
+#   sudo yum install -y portaudio portaudio-devel && pip install pyaudio
+# Microsoft Windows
+#   python -m pip install pyaudio
 
-# 阿里云语音合成服务相关链接
-# 示例代码参考文档
-# https://help.aliyun.com/zh/isi/developer-reference/stream-input-tts-sdk-quick-start
-
-# 获取appkey和accesstoken的链接
-# appkey申请地址: https://nls-portal.console.aliyun.com/applist  
-# accesstoken申请地址: https://nls-portal.console.aliyun.com/overview
-
-# 示例代码使用注意事项:
-# 1. SDK方法名更新 - 示例代码中的方法名与最新SDK不一致,需参考SDK源码进行修改
-# 2. SSL证书缺失 - 需要安装SSL证书才能连接NLS服务
-# 3. 声音ID无效 - 示例代码中使用的声音ID不存在,需要更换为有效的声音ID
-# 4. 将每句话分别保存为音频文件的能力始终无法实现
-
-import nls
+# 导入本地stream_input_tts模块
+from stream_input_tts import NlsStreamInputTtsSynthesizer
 import time
 import os
 import json
-from datetime import datetime
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkcore.request import CommonRequest
 from dotenv import load_dotenv
+import inspect
 
 # 加载环境变量文件中的配置
-load_dotenv()
+load_dotenv(override=True)
 
-# 设置打开日志输出
-nls.enableTrace(False)
-
-# 配置选项
 # 将音频保存进文件
-SAVE_TO_FILE = True
+SAVE_TO_FILE = False
 # 将音频通过播放器实时播放，需要具有声卡。在服务器上运行请将此开关关闭
-PLAY_REALTIME_RESULT = False
+PLAY_REALTIME_RESULT = True
 if PLAY_REALTIME_RESULT:
     import pyaudio
 
+# 使用克隆语音ID
+# 使用最新创建的语音模型ID
+VOICE_ID = "cosyvoice-v2-mysound03-3436a10"
+
 def get_token():
     """获取阿里云语音合成服务的访问Token"""
-    # 创建AcsClient实例，用于与阿里云API通信
-    client = AcsClient(
-        os.getenv('ALIYUN_AK_ID'),        # 阿里云AccessKey ID
-        os.getenv('ALIYUN_AK_SECRET'),    # 阿里云AccessKey Secret
-        "cn-shanghai"                      # 区域ID，固定为上海区域
-    )
-
-    # 创建请求并设置参数
-    request = CommonRequest()
-    request.set_method('POST')                             # 设置HTTP方法为POST
-    request.set_domain('nls-meta.cn-shanghai.aliyuncs.com')  # 设置API域名
-    request.set_version('2019-02-28')                      # 设置API版本
-    request.set_action_name('CreateToken')                 # 设置API操作名称
-
     try:
-        # 发送请求并获取响应
+        # 创建AcsClient实例，用于与阿里云API通信
+        client = AcsClient(
+            os.getenv('ALIYUN_AK_ID'),        # 阿里云AccessKey ID
+            os.getenv('ALIYUN_AK_SECRET'),    # 阿里云AccessKey Secret
+            "cn-shanghai"                      # 区域ID，固定为上海区域
+        )
+
+        # 创建请求对象
+        request = CommonRequest()
+        request.set_method('POST')
+        request.set_domain('nls-meta.cn-shanghai.aliyuncs.com')
+        request.set_version('2019-02-28')
+        request.set_action_name('CreateToken')
+        request.set_protocol_type('https')
+        
+        # 添加必要的请求头
+        request.add_header('Content-Type', 'application/json')
+        
+        # 发送请求
         response = client.do_action_with_exception(request)
-        # 解析JSON响应
-        jss = json.loads(response)
-        # 检查响应中是否包含Token
-        if 'Token' in jss and 'Id' in jss['Token']:
-            return jss['Token']['Id']
+        response = json.loads(response)
+
+        # 检查响应
+        if 'Token' in response and 'Id' in response['Token']:
+            print("Token获取成功")
+            return response['Token']['Id']
         else:
-            raise Exception("Token not found in response")
+            print(f"获取Token失败: {response}")
+            return None
+
     except Exception as e:
-        # 捕获并记录错误
-        print(f"Error getting token: {str(e)}")
+        print(f"获取Token时出错: {str(e)}")
+        print("请检查以下内容：")
+        print("1. AccessKey ID 和 Secret 是否正确")
+        print("2. 是否已在阿里云控制台开通语音合成服务")
+        print("3. AccessKey 是否有语音合成服务的访问权限")
         return None
 
-def get_story_folder():
-    """获取story文件夹路径"""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    story_folder = os.path.join(current_dir, "story")
-    if not os.path.exists(story_folder):
-        os.makedirs(story_folder)
-    return story_folder
-
-def load_text_from_story_folder():
-    """从story文件夹中读取所有txt文件的内容"""
-    story_folder = get_story_folder()
-    if not os.path.exists(story_folder):
-        print("未找到story文件夹，使用默认文本")
-        return [
-            "这是一个示例故事。",
-            "当无法获取到实际故事内容时，将播放这段默认文本。",
-            "请确保story文件夹中有有效的文本文件，或检查故事生成服务是否正常工作。"
-        ]
-    
-    text_content = []
-    files_processed = 0
-    
-    # 获取文件夹中所有txt文件
-    txt_files = [f for f in os.listdir(story_folder) if f.endswith('.txt')]
-    # 按文件的创建时间排序，最新的文件排在前面
-    txt_files.sort(key=lambda x: os.path.getctime(os.path.join(story_folder, x)), reverse=True)
-    
-    # 如果有文件，只处理最新的一个文件
-    if txt_files:
-        latest_file = txt_files[0]
-        file_path = os.path.join(story_folder, latest_file)
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                # 将内容按句号分割，确保每段都是完整的句子
-                sentences = []
-                for sentence in content.split('。'):
-                    sentence = sentence.strip()
-                    if sentence:
-                        # 如果句子不以标点符号结尾，添加句号
-                        if not sentence[-1] in ['。', '！', '？', '…']:
-                            sentence += '。'
-                        sentences.append(sentence)
-                text_content.extend(sentences)
-                files_processed += 1
-                print(f"已加载文件: {latest_file}")
-        except Exception as e:
-            print(f"读取文件 {latest_file} 时出错: {str(e)}")
-    
-    if not text_content:
-        print("所有文件为空，使用默认文本")
-        return [
-            "这是一个示例故事。",
-            "当无法获取到实际故事内容时，将播放这段默认文本。",
-            "请确保story文件夹中有有效的文本文件，或检查故事生成服务是否正常工作。"
-        ]
-    
-    return text_content
-
-# 替换原来的 test_text 定义
-test_text = load_text_from_story_folder()
-
+# 添加process_tts函数，用于被主控文件调用
 def process_tts(token, test_text, story_title=None, sentence_number=None, total_sentences=None):
     """
     处理文本到语音的转换
@@ -182,79 +127,177 @@ def process_tts(token, test_text, story_title=None, sentence_number=None, total_
             """错误回调函数，处理错误事件"""
             nonlocal completed
             completed = True
-            print("on_error message=>{} args=>{}".format(message, args))
+            error_msg = str(message)
+            print(f"语音合成错误: {error_msg}")
+            
+            # 处理特定错误码
+            if "418" in error_msg:
+                print("错误418: 语音克隆服务未正确配置或未激活")
+                print("请检查：")
+                print("1. 是否已在阿里云控制台开通语音克隆服务")
+                print("2. 音频样本是否符合要求（WAV格式，16kHz采样率，30秒以上）")
+                print("3. AccessKey是否有语音克隆服务的权限")
+                print("4. 是否使用了正确的克隆语音ID")
+            elif "401" in error_msg:
+                print("错误401: Token无效或已过期")
+                print("请重新获取Token")
+            elif "403" in error_msg:
+                print("错误403: 没有访问权限")
+                print("请检查AccessKey权限配置")
+            elif "40002001" in error_msg:
+                print("错误40002001: 下载音频文件失败")
+                print("请检查：")
+                print("1. OSS中的音频文件是否存在")
+                print("2. OSS的访问权限是否正确设置")
+                print("3. 音频文件的URL是否可以正常访问")
+                print("4. 音频文件格式是否符合要求（WAV格式，16kHz采样率）")
 
+        # 获取appkey
+        appkey = os.getenv('ALIYUN_APPKEY')
+        if not appkey:
+            print("错误：未找到ALIYUN_APPKEY环境变量")
+            return None
+      
         # 初始化语音合成SDK
-        sdk = nls.NlsSpeechSynthesizer(
-            url="wss://nls-gateway-cn-beijing.aliyuncs.com/ws/v1",  # 阿里云语音合成服务的WebSocket URL
+        sdk = NlsStreamInputTtsSynthesizer(
+            # 由于目前阶段大模型音色只在北京地区服务可用，因此需要调整url到北京
+            url="wss://nls-gateway-cn-beijing.aliyuncs.com/ws/v1",
             token=token,                                            # 访问Token
-            appkey="dB2VfKnIiLeJT9j7",                              # 应用的AppKey
+            appkey=appkey,                                          # 应用的AppKey
             on_data=test_on_data,                                   # 数据回调函数
             on_close=test_on_close,                                 # 关闭回调函数
             on_error=test_on_error,                                 # 错误回调函数
             callback_args=[]                                        # 回调函数的额外参数
         )
 
-        # 处理每个文本片段
-        for text in test_text:
-            # 开始语音合成
-            completed = False
-            sdk.start(
-                text=text,                # 要合成的文本
-                voice="zhixiaobai",       # 语音角色，这里使用"知小白"
-                aformat="wav",            # 音频格式，这里使用WAV
-                sample_rate=24000,        # 采样率，24kHz
-                volume=50,                # 音量，范围0-100
-                speech_rate=0,            # 语速，0表示正常语速
-                pitch_rate=0,             # 音调，0表示正常音调
-            )
-            
-            # 等待语音合成完成（通过回调设置completed标志）
-            max_wait = 30  # 最大等待时间，秒
-            wait_start = time.time()
-            while not completed and time.time() - wait_start < max_wait:
-                time.sleep(0.01)  # 短暂睡眠，避免CPU使用率过高
-
+        # 开始语音合成，设置参数
+        sdk.startStreamInputTts(
+            voice=VOICE_ID,             # 使用克隆的语音ID
+            aformat="wav",               # 音频格式
+            sample_rate=24000,           # 采样率
+            volume=50,                   # 音量，范围0-100
+            speech_rate=0,               # 语速，0表示正常语速
+            pitch_rate=0                 # 音调，0表示正常音调
+        )
+        
+        # 发送文本进行合成
+        sdk.sendStreamInputTts(test_text[0])
+        
+        # 停止合成
+        sdk.stopStreamInputTts()
+        
         # 关闭SDK连接
         sdk.shutdown()
-        
-        # 获取缓冲区中的所有数据
+
+        # 获取合成的音频数据
         audio_data = audio_buffer.getvalue()
-        return audio_data
-        
+
+        # 检查音频数据是否有效
+        if len(audio_data) > 0:
+            print("语音合成成功")
+            return audio_data
+        else:
+            print("语音合成失败：未生成音频数据")
+            return None
+
+    except Exception as e:
+        print(f"语音合成过程出错: {str(e)}")
+        return None
     finally:
-        # 确保关闭缓冲区
-        audio_buffer.close()
+        # 确保关闭SDK连接
+        try:
+            sdk.shutdown()
+        except:
+            pass
+
+test_text = [
+    "流式文本语音合成SDK，",
+    "可以将输入的文本",
+    "合成为语音二进制数据，",
+    "相比于非流式语音合成，",
+    "流式合成的优势在于实时性",
+]
 
 if __name__ == "__main__":
-    # 首先获取Token
+    if SAVE_TO_FILE:
+        file = open("output.wav", "wb")
+    if PLAY_REALTIME_RESULT:
+        player = pyaudio.PyAudio()
+        stream = player.open(
+            format=pyaudio.paInt16, channels=1, rate=24000, output=True
+        )
+
+    # 配置回调函数
+    def test_on_data(data, *args):
+        if SAVE_TO_FILE:
+            file.write(data)
+        if PLAY_REALTIME_RESULT:
+            stream.write(data)
+
+    def test_on_message(message, *args):
+        print("on message=>{}".format(message))
+
+    def test_on_close(*args):
+        print("on_close: args=>{}".format(args))
+
+    def test_on_error(message, *args):
+        print("on_error message=>{} args=>{}".format(message, args))
+
+    # 获取token和appkey
     token = get_token()
-    if not token:
-        print("Failed to get token. Exiting...")
+    appkey = os.getenv('ALIYUN_APPKEY')
+    
+    if not token or not appkey:
+        print("无法获取token或appkey，请检查配置")
         exit(1)
-
-    # 获取要处理的文本
-    sentences = load_text_from_story_folder()
-    if not sentences:
-        print("未找到任何文本内容，退出...")
-        exit(1)
+    
+    # 使用NlsStreamInputTtsSynthesizer类进行流式语音合成
+    print("开始流式语音合成...")
+    
+    # 创建SDK实例
+    sdk = NlsStreamInputTtsSynthesizer(
+        # 由于目前阶段大模型音色只在北京地区服务可用，因此需要调整url到北京
+        url="wss://nls-gateway-cn-beijing.aliyuncs.com/ws/v1",
         
-    print(f"共找到 {len(sentences)} 个句子，开始处理...")
-
-    # 为每句话单独处理TTS转换
-    for index, text in enumerate(sentences, 1):
-        print(f"正在处理第 {index} 句话")
-        
-        # 每句话单独调用TTS转换
-        audio_data = process_tts(token, [text], story_title="示例故事", sentence_number=index, total_sentences=len(sentences))
-        
-        # 如果需要测试播放，可以临时保存并播放
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            temp_file.write(audio_data)
-            temp_path = temp_file.name
-        
-        print(f"音频数据大小: {len(audio_data)} 字节")
-        print(f"临时保存到: {temp_path}")
-        
-        # 可以在这里添加播放代码进行测试
+        token=token,                                            # 动态获取的token
+        appkey=appkey,                                          # 从.env文件中获取的appkey
+        on_data=test_on_data,
+        on_close=test_on_close,
+        on_error=test_on_error,
+        callback_args=[],
+    )
+    
+    # 开始合成
+    sdk.startStreamInputTts(
+        voice=VOICE_ID,                                          # 语音合成说话人
+        aformat="wav",                                          # 合成音频格式
+        sample_rate=24000,                                      # 合成音频采样率
+        volume=50,                                              # 合成音频的音量
+        speech_rate=0,                                          # 合成音频语速
+        pitch_rate=0,                                           # 合成音频的音调
+    )
+    
+    # 流式输入文本
+    for i, text in enumerate(test_text):
+        print(f"输入第{i+1}/{len(test_text)}段文本: {text}")
+        sdk.sendStreamInputTts(text)
+        # # 添加一个小延迟，避免请求过于频繁
+        # time.sleep(0.1)
+    
+    # 停止合成
+    sdk.stopStreamInputTts()
+    
+    # 关闭SDK实例
+    sdk.shutdown()
+    
+    # 关闭文件
+    if SAVE_TO_FILE:
+        file.close()
+    
+    # 关闭音频流
+    if PLAY_REALTIME_RESULT:
+        stream.stop_stream()
+        stream.close()
+        player.terminate()
+    
+    print("所有文本处理完成")
