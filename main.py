@@ -16,6 +16,15 @@ from getusercomment import start_comment_monitoring, stop_comment_monitoring
 from getResponseFromQianwen import process_live_comment
 from dotenv import load_dotenv
 import struct
+from spotify_api import SpotifyAPI
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+import random
+import json
+import requests
+
+# 缓存文件路径
+CACHE_PATH = ".spotify_cache"
 
 # https://live.douyin.com/769032284842
 class StoryPlayer:
@@ -43,11 +52,51 @@ class StoryPlayer:
         self.global_token = None
         self.comment_cache = []
         
+        # 初始化Spotify API
+        self.spotify_api = SpotifyAPI()
+        
+        # 初始化Spotify播放器
+        self.sp = self._init_spotify()
+        
         # 新增：保存被中断的句子信息
         self.interrupted_sentence = None
         self.interrupted_sentence_index = None
         self.interrupted_story_title = None
         
+    def _init_spotify(self):
+        """初始化Spotify客户端"""
+        try:
+            # 设置Spotify API凭证
+            client_id = "036473f257b543c8956060e7147a4624"
+            client_secret = "c5978c45956445c89bc2268144ce1994"
+            username = "shanxutech@foxmail.com"
+            
+            # 创建SpotifyOAuth对象
+            sp_oauth = SpotifyOAuth(
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri="http://127.0.0.1:8000/callback",
+                scope="user-read-playback-state,user-modify-playback-state,playlist-read-private",
+                username=username,
+                open_browser=True
+            )
+            
+            # 获取token
+            token_info = sp_oauth.get_access_token()
+            if not token_info:
+                raise Exception("获取访问令牌失败")
+            
+            # 使用token初始化Spotify客户端
+            return spotipy.Spotify(auth=token_info['access_token'])
+            
+        except Exception as e:
+            print(f"Spotify授权失败: {str(e)}")
+            print("请确保：")
+            print("1. 已在Spotify开发者平台添加重定向URI: http://127.0.0.1:8000/callback")
+            print("2. 已登录正确的Spotify账号")
+            print("3. 已安装并运行Spotify客户端")
+            raise
+    
     async def play_audio(self, audio_data):
         """异步播放音频数据"""
         try:
@@ -297,6 +346,160 @@ class StoryPlayer:
                     # 如果有新评论，先处理新评论
                     break
     
+    async def play_spotify_music(self):
+        """异步播放Spotify音乐"""
+        try:
+            # 获取用户的所有歌单
+            playlists = self.sp.current_user_playlists(limit=50)
+            old_songs_playlist = None
+            
+            # 遍历所有歌单，找到用户自己创建的"old songs"歌单
+            while playlists:
+                for playlist in playlists['items']:
+                    # 检查是否是用户自己创建的歌单（owner.id与当前用户相同）
+                    if (playlist['name'].lower() == 'old songs' and 
+                        playlist['owner']['id'] == self.sp.current_user()['id']):
+                        old_songs_playlist = playlist
+                        break
+                
+                if old_songs_playlist:
+                    break
+                
+                # 如果有下一页，继续获取
+                if playlists['next']:
+                    playlists = self.sp.next(playlists)
+                else:
+                    break
+            
+            if not old_songs_playlist:
+                print("未找到用户创建的'old songs'歌单")
+                return
+            
+            print(f"找到歌单: {old_songs_playlist['name']} (创建者: {old_songs_playlist['owner']['display_name']})")
+            
+            # 获取歌单中的所有歌曲
+            tracks = self.spotify_api.get_playlist_tracks(old_songs_playlist['id'])
+            if not tracks:
+                print("无法获取歌单歌曲")
+                return
+            
+            # 随机选择一首歌曲
+            random_track = random.choice(tracks)
+            track_name = random_track['track']['name']
+            artist_name = random_track['track']['artists'][0]['name']
+            track_uri = random_track['track']['uri']
+            
+            print(f"正在播放: {track_name} - {artist_name}")
+            
+            try:
+                # 获取当前设备
+                devices = self.sp.devices()
+                if not devices['devices']:
+                    print("未找到可用的Spotify设备，请确保Spotify客户端已打开")
+                    raise Exception("No available devices")
+                
+                # 使用第一个可用设备
+                device_id = devices['devices'][0]['id']
+                
+                # 开始播放
+                self.sp.start_playback(device_id=device_id, uris=[track_uri])
+                
+                # 等待歌曲播放完成
+                while True:
+                    current_playback = self.sp.current_playback()
+                    if not current_playback or not current_playback['is_playing']:
+                        break
+                    await asyncio.sleep(1)
+                    
+            except Exception as e:
+                print(f"使用Premium播放失败: {str(e)}")
+                print("请确保：")
+                print("1. Spotify客户端已打开")
+                print("2. 已登录正确的Premium账号")
+                print("3. 设备已正确连接")
+            
+        except Exception as e:
+            print(f"播放Spotify音乐时出错: {str(e)}")
+
+    async def search_and_play_song(self, query):
+        """搜索并播放Spotify歌曲"""
+        try:
+            # 停止当前正在播放的音乐
+            pygame.mixer.stop()
+            
+            # 搜索歌曲
+            results = self.sp.search(q=query, type='track', limit=1)
+            if not results['tracks']['items']:
+                print(f"未找到歌曲: {query}")
+                return
+            
+            # 获取第一首匹配的歌曲
+            track = results['tracks']['items'][0]
+            track_name = track['name']
+            artist_name = track['artists'][0]['name']
+            track_uri = track['uri']
+            preview_url = track['preview_url']
+            
+            print(f"正在播放: {track_name} - {artist_name}")
+            
+            try:
+                # 获取当前设备
+                devices = self.sp.devices()
+                if not devices['devices']:
+                    print("未找到可用的Spotify设备，请确保Spotify客户端已打开")
+                    raise Exception("No available devices")
+                
+                # 使用第一个可用设备
+                device_id = devices['devices'][0]['id']
+                
+                # 开始播放
+                self.sp.start_playback(device_id=device_id, uris=[track_uri])
+                
+                # 等待歌曲播放完成
+                while True:
+                    current_playback = self.sp.current_playback()
+                    if not current_playback or not current_playback['is_playing']:
+                        break
+                    await asyncio.sleep(1)
+                    
+            except Exception as e:
+                print("Spotify Premium播放失败，尝试使用预览音频...")
+                if not preview_url:
+                    print(f"歌曲 {track_name} 没有预览音频")
+                    return
+                
+                try:
+                    # 下载预览音频
+                    response = requests.get(preview_url)
+                    if response.status_code != 200:
+                        print("下载预览音频失败")
+                        return
+                    
+                    # 保存为临时文件
+                    temp_file = "temp_preview.mp3"
+                    with open(temp_file, "wb") as f:
+                        f.write(response.content)
+                    
+                    # 使用pygame播放预览音频
+                    sound = pygame.mixer.Sound(temp_file)
+                    sound.play()
+                    
+                    # 等待播放完成
+                    while pygame.mixer.get_busy():
+                        await asyncio.sleep(0.1)
+                    
+                    # 清理临时文件
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                        
+                except Exception as e2:
+                    print(f"播放预览音频时出错: {str(e2)}")
+            
+        except Exception as e:
+            print(f"搜索并播放歌曲时出错: {str(e)}")
+    
     async def play_stories(self):
         """异步播放故事"""
         try:
@@ -422,8 +625,14 @@ class StoryPlayer:
             # 创建并启动故事播放任务
             story_task = asyncio.create_task(self.play_stories())
             
-            # 等待故事播放任务完成
-            await story_task
+            # 创建并启动Spotify音乐播放任务
+            music_task = asyncio.create_task(self.play_spotify_music())
+            
+            # 创建并启动用户输入处理任务
+            input_task = asyncio.create_task(self.handle_user_input())
+            
+            # 等待所有任务完成
+            await asyncio.gather(story_task, music_task, input_task)
                 
         except Exception as e:
             print(f"运行出错：{str(e)}")
@@ -431,6 +640,22 @@ class StoryPlayer:
             # 如果启动了评论监控，确保停止
             if 'douyin_live_url' in locals() and douyin_live_url:
                 stop_comment_monitoring()
+
+    async def handle_user_input(self):
+        """处理用户输入"""
+        while True:
+            try:
+                # 使用asyncio.get_event_loop().run_in_executor来异步获取用户输入
+                query = await asyncio.get_event_loop().run_in_executor(None, input, "请输入要搜索的歌曲名称（输入'q'退出）: ")
+                
+                if query.lower() == 'q':
+                    break
+                
+                if query.strip():
+                    await self.search_and_play_song(query)
+            except Exception as e:
+                print(f"处理用户输入时出错: {str(e)}")
+                await asyncio.sleep(1)  # 出错时等待1秒后继续
 
 
 if __name__ == "__main__":
