@@ -40,10 +40,8 @@ class StoryPlayer:
         pygame.mixer.init()
         
         # 创建事件和锁
-        self.story_paused = threading.Event()
-        self.story_paused.clear()
-        self.sentence_completed = threading.Event()
-        self.sentence_completed.set()
+        self.song_completed = threading.Event()
+        self.song_completed.set()
         self.interaction_lock = threading.Lock()
         self.comment_cache_lock = threading.Lock()
         
@@ -51,6 +49,7 @@ class StoryPlayer:
         self.is_processing_interaction = False
         self.global_token = None
         self.comment_cache = []
+        self.current_song_index = None
         
         # 初始化Spotify API
         self.spotify_api = SpotifyAPI()
@@ -58,10 +57,8 @@ class StoryPlayer:
         # 初始化Spotify播放器
         self.sp = self._init_spotify()
         
-        # 新增：保存被中断的句子信息
-        self.interrupted_sentence = None
-        self.interrupted_sentence_index = None
-        self.interrupted_story_title = None
+        # 加载歌曲信息
+        self.songs_info = self._load_songs_info()
         
     def _init_spotify(self):
         """初始化Spotify客户端"""
@@ -115,7 +112,7 @@ class StoryPlayer:
             # 等待播放完成
             while pygame.mixer.get_busy():
                 # 检查是否需要暂停
-                if self.story_paused.is_set():
+                if self.song_completed.is_set():
                     print("检测到暂停事件，等待当前音频播放完成...")
                     # 等待当前音频播放完成
                     while pygame.mixer.get_busy():
@@ -129,9 +126,9 @@ class StoryPlayer:
             except:
                 pass
                 
-            # 只有在音频成功播放完成且未被暂停时才设置sentence_completed事件
-            if not self.story_paused.is_set():
-                self.sentence_completed.set()
+            # 只有在音频成功播放完成且未被暂停时才设置song_completed事件
+            if not self.song_completed.is_set():
+                self.song_completed.set()
                 
         except Exception as e:
             print(f"播放音频时出错: {str(e)}")
@@ -143,13 +140,13 @@ class StoryPlayer:
                     sd.play(data, samplerate=samplerate)
                     sd.wait()
                 
-                # 只有在备用方法也成功播放后才设置sentence_completed事件
-                if not self.story_paused.is_set():
-                    self.sentence_completed.set()
+                # 只有在备用方法也成功播放后才设置song_completed事件
+                if not self.song_completed.is_set():
+                    self.song_completed.set()
             except Exception as e2:
                 print(f"备用播放方法也失败: {str(e2)}")
                 print("音频播放失败，请检查系统音频设备")
-                # 音频播放失败时，不设置sentence_completed事件
+                # 音频播放失败时，不设置song_completed事件
     
     def add_wav_header_if_needed(self, audio_data, sample_rate=24000, channels=1, bits_per_sample=16):
         """
@@ -198,23 +195,6 @@ class StoryPlayer:
         # 合并文件头和音频数据
         return header + audio_data
     
-    def load_story_files(self, folder_path):
-        """从文件夹中读取所有故事文本文件"""
-        story_files = [f for f in os.listdir(folder_path) if f.endswith('.txt')]
-        story_files.sort()
-        stories = []
-        
-        for file in story_files:
-            try:
-                with open(os.path.join(folder_path, file), 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                    if content:
-                        stories.append((file, content))
-            except Exception as e:
-                print(f"读取文件 {file} 时出错: {str(e)}")
-        
-        return stories
-    
     def split_into_sentences(self, text):
         """将文本分割成句子"""
         sentences = []
@@ -236,13 +216,13 @@ class StoryPlayer:
                 print(f"缓存评论: {username}: {comment_text}")
                 
                 # 设置暂停事件，但等待当前句子播放完成
-                if not self.sentence_completed.is_set():
+                if not self.song_completed.is_set():
                     print("等待当前句子播放完成...")
-                    self.story_paused.set()
+                    self.song_completed.set()
                 else:
                     # 如果当前句子已经播放完成，立即处理评论
                     print(f"当前句子已播放完成，立即处理评论: {username}: {comment_text}")
-                    self.story_paused.set()
+                    self.song_completed.set()
                     asyncio.create_task(self.process_comment_cache())
     
     def handle_welcome(self,username):
@@ -308,11 +288,11 @@ class StoryPlayer:
                 # 重置处理标志
                 self.is_processing_interaction = False
                 
-                # 确保sentence_completed事件被设置
-                self.sentence_completed.set()
+                # 确保song_completed事件被设置
+                self.song_completed.set()
                 
                 # 恢复故事播放
-                self.story_paused.clear()
+                self.song_completed.clear()
     
     async def process_comment_cache(self):
         """处理评论缓存中的评论"""
@@ -326,7 +306,7 @@ class StoryPlayer:
             if not self.comment_cache:
                 # 如果缓存为空，清除暂停事件
                 print("评论缓存为空，清除暂停事件")
-                self.story_paused.clear()
+                self.song_completed.clear()
                 return
             
             # 获取所有未处理的评论
@@ -383,44 +363,120 @@ class StoryPlayer:
                 print("无法获取歌单歌曲")
                 return
             
-            # 随机选择一首歌曲
-            random_track = random.choice(tracks)
-            track_name = random_track['track']['name']
-            artist_name = random_track['track']['artists'][0]['name']
-            track_uri = random_track['track']['uri']
+            # 创建歌曲列表的副本用于随机播放
+            available_tracks = tracks.copy()
             
-            print(f"正在播放: {track_name} - {artist_name}")
-            
-            try:
-                # 获取当前设备
-                devices = self.sp.devices()
-                if not devices['devices']:
-                    print("未找到可用的Spotify设备，请确保Spotify客户端已打开")
-                    raise Exception("No available devices")
+            while True:  # 添加无限循环
+                if not available_tracks:  # 如果所有歌曲都播放过了，重新填充列表
+                    available_tracks = tracks.copy()
                 
-                # 使用第一个可用设备
-                device_id = devices['devices'][0]['id']
+                # 随机选择一首歌曲
+                random_track = random.choice(available_tracks)
+                available_tracks.remove(random_track)  # 从可用列表中移除已播放的歌曲
                 
-                # 开始播放
-                self.sp.start_playback(device_id=device_id, uris=[track_uri])
+                track_name = random_track['track']['name']
+                artist_name = random_track['track']['artists'][0]['name']
+                track_uri = random_track['track']['uri']
                 
-                # 等待歌曲播放完成
-                while True:
-                    current_playback = self.sp.current_playback()
-                    if not current_playback or not current_playback['is_playing']:
-                        break
-                    await asyncio.sleep(1)
+                print(f"正在播放: {track_name} - {artist_name}")
+                
+                try:
+                    # 获取当前设备
+                    devices = self.sp.devices()
+                    if not devices['devices']:
+                        print("未找到可用的Spotify设备，请确保Spotify客户端已打开")
+                        raise Exception("No available devices")
                     
-            except Exception as e:
-                print(f"使用Premium播放失败: {str(e)}")
-                print("请确保：")
-                print("1. Spotify客户端已打开")
-                print("2. 已登录正确的Premium账号")
-                print("3. 设备已正确连接")
+                    # 使用第一个可用设备
+                    device_id = devices['devices'][0]['id']
+                    
+                    # 开始播放
+                    self.sp.start_playback(device_id=device_id, uris=[track_uri])
+                    
+                    # 查找并播报歌曲信息
+                    song_info = self._find_song_info(track_name, artist_name)
+                    if song_info:
+                        await self._announce_song_info(song_info)
+                    
+                    # 等待歌曲播放完成
+                    while True:
+                        current_playback = self.sp.current_playback()
+                        if not current_playback or not current_playback['is_playing']:
+                            break
+                        await asyncio.sleep(1)
+                        
+                        # 检查是否有评论需要处理
+                        if self.comment_cache:
+                            # 等待当前歌曲播放完成
+                            self.song_completed.set()
+                            # 处理评论
+                            await self.process_comment_cache()
+                            # 继续播放下一首歌曲
+                            break
+                        
+                except Exception as e:
+                    print(f"使用Premium播放失败: {str(e)}")
+                    print("请确保：")
+                    print("1. Spotify客户端已打开")
+                    print("2. 已登录正确的Premium账号")
+                    print("3. 设备已正确连接")
+                    await asyncio.sleep(5)  # 出错后等待5秒再尝试下一首
+                    continue  # 继续播放下一首歌曲
             
         except Exception as e:
             print(f"播放Spotify音乐时出错: {str(e)}")
-
+            
+    def _find_song_info(self, track_name, artist_name):
+        """查找歌曲信息"""
+        print(f"正在查找歌曲信息 - 歌曲名: {track_name}, 艺术家: {artist_name}")
+        
+        # 遍历所有歌曲
+        for song in self.songs_info.get('songs', []):                     
+            # 主要检查歌曲名是否匹配
+            if song['title'] == track_name:
+                return song          
+            # 如果完全匹配失败，尝试部分匹配
+            if track_name in song['title'] or song['title'] in track_name:
+                return song
+        
+        print(f"未找到匹配的歌曲信息")
+        return None
+        
+    async def _announce_song_info(self, song_info):
+        """播报歌曲信息"""
+        try:
+            # 获取token，如果全局token不可用则重新获取
+            token = self.global_token
+            if not token:
+                token = get_token()
+                if token:
+                    self.global_token = token
+            
+            if not token:
+                print("无法获取语音token，跳过歌曲信息播报")
+                return
+            
+            # 准备播报内容
+            announcement = f"{song_info['title']}，{song_info['description']}"
+            
+            # 使用TTS生成语音数据
+            audio_data = process_tts(
+                token,
+                [announcement],
+                story_title=f"歌曲信息",
+                sentence_number=1,
+                total_sentences=1
+            )
+            
+            # 播放语音
+            if audio_data:
+                await self.play_audio(audio_data)
+            else:
+                print(f"警告: 歌曲信息语音生成失败")
+                
+        except Exception as e:
+            print(f"播报歌曲信息时出错: {str(e)}")
+    
     async def search_and_play_song(self, query):
         """搜索并播放Spotify歌曲"""
         try:
@@ -500,107 +556,8 @@ class StoryPlayer:
         except Exception as e:
             print(f"搜索并播放歌曲时出错: {str(e)}")
     
-    async def play_stories(self):
-        """异步播放故事"""
-        try:
-            # 获取当前目录
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            # 获取语音转换token，优先使用全局token
-            token = self.global_token or get_token()
-            if not token:
-                raise Exception("获取token失败")
-            
-            # 使用story文件夹
-            story_folder = os.path.join(current_dir, "story")
-            if not os.path.exists(story_folder):
-                os.makedirs(story_folder)
-                print(f"创建story文件夹: {story_folder}")
-            
-            # 读取故事文件
-            stories = self.load_story_files(story_folder)
-            if not stories:
-                raise Exception("未找到任何故事文件")
-            
-            # 处理每个故事
-            for story_file, story_content in stories:
-                # 使用文件名（不含扩展名）作为故事标识和标题
-                story_id = os.path.splitext(story_file)[0]
-                story_title = story_id
-                
-                print(f"\n开始播放故事: 【{story_title}】")
-                
-                # 将故事分割成句子
-                sentences = self.split_into_sentences(story_content)
-                
-                # 为每个句子生成语音并实时播放
-                i = 0
-                while i < len(sentences):
-                    # 如果有被中断的句子，先处理它
-                    if self.interrupted_sentence is not None and self.interrupted_story_title == story_title:
-                        sentence = self.interrupted_sentence
-                        i = self.interrupted_sentence_index
-                        # 清除中断信息
-                        self.interrupted_sentence = None
-                        self.interrupted_sentence_index = None
-                        self.interrupted_story_title = None
-                    else:
-                        sentence = sentences[i]
-                    
-                    # 清除sentence_completed事件，表示新句子开始播放
-                    self.sentence_completed.clear()
-                    
-                    # 检查是否需要处理评论
-                    if self.story_paused.is_set():
-                        # 保存当前句子信息
-                        self.interrupted_sentence = sentence
-                        self.interrupted_sentence_index = i
-                        self.interrupted_story_title = story_title
-                        
-                        # 处理评论缓存
-                        await self.process_comment_cache()
-                        continue  # 继续处理被中断的句子
-                    
-                    print(f"生成第 {i+1}/{len(sentences)} 句语音: {sentence[:30]}...")
-                    
-                    # 使用TTS生成语音数据
-                    audio_data = process_tts(
-                        token, 
-                        [sentence],
-                        story_title=story_title,
-                        sentence_number=i+1,
-                        total_sentences=len(sentences)
-                    )
-                    
-                    # 播放生成的语音
-                    if audio_data:
-                        await self.play_audio(audio_data)
-                        
-                        # 检查是否需要处理评论
-                        if self.story_paused.is_set():
-                            # 保存当前句子信息
-                            self.interrupted_sentence = sentence
-                            self.interrupted_sentence_index = i
-                            self.interrupted_story_title = story_title
-                            
-                            # 处理评论缓存
-                            await self.process_comment_cache()
-                            continue  # 继续处理被中断的句子
-                        
-                        # 如果成功播放完成且没有被中断，移动到下一句
-                        i += 1
-                    else:
-                        print(f"警告: 第 {i+1} 句语音数据生成失败，跳过")
-                        i += 1
-                
-                # 故事播放完成后的分隔
-                print(f"故事 【{story_title}】 播放完成!")
-                
-        except Exception as e:
-            print(f"播放故事时出错：{str(e)}")
-    
     async def run(self):
-        """运行故事播放器"""
+        """运行音乐播放器"""
         try:
             # 获取语音转换token并保存到全局变量
             self.global_token = get_token()
@@ -620,10 +577,7 @@ class StoryPlayer:
                     return
                 print("评论监控已成功启动")
             else:
-                print("跳过评论监控，仅播放故事")
-            
-            # 创建并启动故事播放任务
-            story_task = asyncio.create_task(self.play_stories())
+                print("跳过评论监控，仅播放音乐")
             
             # 创建并启动Spotify音乐播放任务
             music_task = asyncio.create_task(self.play_spotify_music())
@@ -632,7 +586,7 @@ class StoryPlayer:
             input_task = asyncio.create_task(self.handle_user_input())
             
             # 等待所有任务完成
-            await asyncio.gather(story_task, music_task, input_task)
+            await asyncio.gather(music_task, input_task)
                 
         except Exception as e:
             print(f"运行出错：{str(e)}")
@@ -656,6 +610,15 @@ class StoryPlayer:
             except Exception as e:
                 print(f"处理用户输入时出错: {str(e)}")
                 await asyncio.sleep(1)  # 出错时等待1秒后继续
+
+    def _load_songs_info(self):
+        """加载歌曲信息"""
+        try:
+            with open('songs_info.json', 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"加载歌曲信息失败: {str(e)}")
+            return {"songs": []}
 
 
 if __name__ == "__main__":
