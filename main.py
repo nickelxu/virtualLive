@@ -499,22 +499,46 @@ class StoryPlayer:
                 return
             
             # 准备播报内容
-            announcement = f"{song_info['title']}，{song_info['description']}"
+            title_announcement = f"{song_info['title']}"
             
-            # 使用TTS生成语音数据
-            audio_data = process_tts(
+            # 使用TTS生成并播放标题
+            title_audio = process_tts(
                 token,
-                [announcement],
-                story_title=f"歌曲信息",
+                [title_announcement],
+                story_title=f"歌曲标题",
                 sentence_number=1,
                 total_sentences=1
             )
             
-            # 播放语音
-            if audio_data:
-                await self.play_audio(audio_data)
+            if title_audio:
+                await self.play_audio(title_audio)
             else:
-                print(f"警告: 歌曲信息语音生成失败")
+                print(f"警告: 歌曲标题语音生成失败")
+            
+            # 将描述按行分割
+            description_lines = song_info['description'].split('\n')
+            
+            # 按顺序播放每一行描述
+            for i, line in enumerate(description_lines, 1):
+                if not line.strip():  # 跳过空行
+                    continue
+                    
+                # 使用TTS生成语音数据
+                audio_data = process_tts(
+                    token,
+                    [line],
+                    story_title=f"歌曲描述",
+                    sentence_number=i,
+                    total_sentences=len(description_lines)
+                )
+                
+                # 播放语音
+                if audio_data:
+                    await self.play_audio(audio_data)
+                    # 等待15秒后播放下一句
+                    await asyncio.sleep(15)
+                else:
+                    print(f"警告: 第{i}行描述语音生成失败")
                 
         except Exception as e:
             print(f"播报歌曲信息时出错: {str(e)}")
