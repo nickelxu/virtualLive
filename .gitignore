@@ -46,3 +46,7 @@ ENV/
 # Project specific
 *.wav
 
+# Cache files
+.cache/
+*.cache
+

@@ -92,6 +92,8 @@ class StoryPlayer:
             print("1. 已在Spotify开发者平台添加重定向URI: http://127.0.0.1:8000/callback")
             print("2. 已登录正确的Spotify账号")
             print("3. 已安装并运行Spotify客户端")
+            print("4. 网络连接稳定")
+            print("5. 如果使用代理，请确保代理设置正确")
             raise
     
     async def play_audio(self, audio_data):
@@ -113,7 +115,6 @@ class StoryPlayer:
             while pygame.mixer.get_busy():
                 # 检查是否需要暂停
                 if self.song_completed.is_set():
-                    print("检测到暂停事件，等待当前音频播放完成...")
                     # 等待当前音频播放完成
                     while pygame.mixer.get_busy():
                         await asyncio.sleep(0.05)
@@ -208,6 +209,20 @@ class StoryPlayer:
     
     def comment_handler(self, username, comment_text, comment_type="评论"):
         """处理直播间评论的回调函数"""
+        # 过滤特定的表情评论
+        filtered_comments = ["小表情", "会员表情"]
+        if comment_text in filtered_comments:
+            return
+            
+        # 处理"想听"特定词
+        if "想听" in comment_text:
+            # 提取"想听"后面的歌曲名称
+            song_name = comment_text.split("想听", 1)[1].strip()
+            if song_name:
+                # 创建异步任务来搜索和播放歌曲
+                asyncio.create_task(self.search_and_play_song(song_name))
+            return
+            
         # 将评论添加到缓存队列
         with self.comment_cache_lock:
             # 检查是否已存在相同的评论
@@ -225,9 +240,40 @@ class StoryPlayer:
                     self.song_completed.set()
                     asyncio.create_task(self.process_comment_cache())
     
-    def handle_welcome(self,username):
-        # """处理用户进入直播间的欢迎消息"""
-        return f"欢迎{username}来到直播间，天天开心喔"
+    async def _announce_welcome(self, username):
+        """播报欢迎信息"""
+        try:
+            # 获取token，如果全局token不可用则重新获取
+            token = self.global_token
+            if not token:
+                token = get_token()
+                if token:
+                    self.global_token = token
+            
+            if not token:
+                print("无法获取语音token，跳过欢迎信息播报")
+                return
+            
+            # 准备播报内容
+            welcome_message = f"欢迎{username}来到直播间，天天开心喔"
+            
+            # 使用TTS生成语音数据
+            audio_data = process_tts(
+                token,
+                [welcome_message],
+                story_title=f"欢迎信息",
+                sentence_number=1,
+                total_sentences=1
+            )
+            
+            # 播放语音
+            if audio_data:
+                await self.play_audio(audio_data)
+            else:
+                print(f"警告: 欢迎信息语音生成失败")
+                
+        except Exception as e:
+            print(f"播报欢迎信息时出错: {str(e)}")
     
     async def process_interaction(self, username, comment_text, comment_type="评论"):
         """处理用户互动"""
@@ -239,7 +285,8 @@ class StoryPlayer:
             try:
                 # 检查是否是"来了"的评论
                 if comment_text == "来了":
-                    response = self.handle_welcome(username)
+                    # 直接播报欢迎信息
+                    await self._announce_welcome(username)
                 else:               
                     # 使用千问AI生成回复
                     system_prompt = "你是一个友好、幽默的直播助手，负责回答直播间观众的问题和评论。回复要简洁、有趣，不超过50个字。"
@@ -298,7 +345,6 @@ class StoryPlayer:
         """处理评论缓存中的评论"""
         # 如果已经在处理互动，直接返回
         if self.is_processing_interaction:
-            print("已经在处理互动，跳过")
             return
         
         # 从缓存中获取评论
@@ -407,12 +453,8 @@ class StoryPlayer:
                         
                         # 检查是否有评论需要处理
                         if self.comment_cache:
-                            # 等待当前歌曲播放完成
-                            self.song_completed.set()
-                            # 处理评论
-                            await self.process_comment_cache()
-                            # 继续播放下一首歌曲
-                            break
+                            # 创建评论处理任务，但不等待其完成
+                            asyncio.create_task(self.process_comment_cache())
                         
                 except Exception as e:
                     print(f"使用Premium播放失败: {str(e)}")
@@ -582,11 +624,8 @@ class StoryPlayer:
             # 创建并启动Spotify音乐播放任务
             music_task = asyncio.create_task(self.play_spotify_music())
             
-            # 创建并启动用户输入处理任务
-            input_task = asyncio.create_task(self.handle_user_input())
-            
-            # 等待所有任务完成
-            await asyncio.gather(music_task, input_task)
+            # 等待任务完成
+            await music_task
                 
         except Exception as e:
             print(f"运行出错：{str(e)}")
@@ -594,22 +633,6 @@ class StoryPlayer:
             # 如果启动了评论监控，确保停止
             if 'douyin_live_url' in locals() and douyin_live_url:
                 stop_comment_monitoring()
-
-    async def handle_user_input(self):
-        """处理用户输入"""
-        while True:
-            try:
-                # 使用asyncio.get_event_loop().run_in_executor来异步获取用户输入
-                query = await asyncio.get_event_loop().run_in_executor(None, input, "请输入要搜索的歌曲名称（输入'q'退出）: ")
-                
-                if query.lower() == 'q':
-                    break
-                
-                if query.strip():
-                    await self.search_and_play_song(query)
-            except Exception as e:
-                print(f"处理用户输入时出错: {str(e)}")
-                await asyncio.sleep(1)  # 出错时等待1秒后继续
 
     def _load_songs_info(self):
         """加载歌曲信息"""
